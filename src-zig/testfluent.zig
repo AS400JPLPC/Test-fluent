@@ -111,33 +111,14 @@ pub fn main() !void {
     buf,
     "^([0-9]{4}[-/]?((0[13-9]|1[012])[-/]?(0[1-9]|[12][0-9]|30)|(0[13578]|1[02])[-/]?31|02[-/]?(0[1-9]|1[0-9]|2[0-8]))|([0-9]{2}(([2468][048]|[02468][48])|[13579][26])|([13579][26]|[02468][048]|0[0-9]|1[0-6])00)[-/]?02[-/]?29)$")});
 
+    //  std.debug.print("fluent {s} :{} \r\n",.{buf,
+    //      isMatch(buf,"^([0-9]{4}[-/]?((0[13-9]|1[012])[-/]?(0[1-9]|[12][0-9]|30)|(0[13578]|1[02])[-/]?31|02[-/]?(0[1-9]|1[0-9]|2[0-8]))|([0-9]{2}(([2468][048]|[02468][48])|[13579][26])|([13579][26]|[02468][048]|0[0-9]|1[0-6])00)[-/]?02[-/]?29)")
+    // });    
 
-// scratch compile 
-    // buf = "1951-11-30";
-    // std.debug.print("fluent {s} :{} \r\n",.{buf,
-    //      isMatch(buf,"([0-9]{4})[-](0[1-9]|1[012])[-]([0-2][0-9]{1,2}|[3][0-1]{1,2})")
-    // });                                                            // gets lost in this clues |[3][0-1]{1,2}
-
-    buf =undefined;
-    buf = "1951-02-29";
-    std.debug.print("fluent {s} :{} \r\n",.{buf,
-         isMatch(buf,"([0-9]{4})[-](0[1-9]|1[012])[-]([0-2][0-9]{1,2})")
-    });
-
-    // only 02-28
-    buf =undefined;
-    buf = "1951-02-29";
-    std.debug.print("fluent hard test 28 {s} :{} \r\n",.{buf,
-         isMatch(buf,"([0-9]{4})[-](0[1-9]|1[02])[-]([2][8]{1,2})")
-    });
-
-
-    // test digit date improper
-    buf =undefined;
-    buf = "1951-11-30";
-    std.debug.print("fluent {s} :{} \r\n",.{buf,
-         isMatch(buf,"([0-9]{4})[-](0[1-9]|1[012])[-]([0-3][0-9]{1,2})")
-    });
+//  compile  date improper 
+    buf = "1951-11-31";    std.debug.print("fluent {s} :{} \r\n",.{buf,
+         isMatch(buf,"([0-9]{4})[-](0[1-9]|1[012])[-]([0-2][0-9]{1,2}|[3][0-1]{1,2})")
+    });    
 
 
  // https://stackoverflow.com/questions/201323/how-can-i-validate-an-email-address-using-a-regular-expression
@@ -146,6 +127,11 @@ pub fn main() !void {
       std.debug.print("Macth Mail{} \r\n",.{creg.isMatch(
       "myname.myfirstname@gmail.com",
       "^([-!#-\'*+\\/-9=?A-Z^-~]{1,64}(\\.[-!#-\'*+\\/-9=?A-Z^-~]{1,64})*|\"([]!#-[^-~ \t]|(\\[\t -~]))+\")@[0-9A-Za-z]([0-9A-Za-z-]{0,61}[0-9A-Za-z])?(\\.[0-9A-Za-z]([0-9A-Za-z-]{0,61}[0-9A-Za-z])?)+$")});
+
+
+    // std.debug.print("fluent {s} :{} \r\n",.{buf,
+    //      isMatch(buf,"^([-!#-\'*+\\/-9=?A-Z^-~]{1,64}(\\.[-!#-\'*+\\/-9=?A-Z^-~]{1,64})*|\"([]!#-[^-~ \t]|(\\[\t -~]))+\")@[0-9A-Za-z]([0-9A-Za-z-]{0,61}[0-9A-Za-z])?(\\.[0-9A-Za-z]([0-9A-Za-z-]{0,61}[0-9A-Za-z])?)+")
+    // });
 
     //oreilly editor book
     buf =undefined;

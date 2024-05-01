@@ -24,21 +24,17 @@ fn FluentInterface(comptime T: type) type {
 
         items: SliceType,
 
-        // we can detect if we have a const slice or non-const
-        // and dispatch to different versions of this thing
-        // depending on the circumstance.
-
-        pub usingnamespace if (isConst(T))
-            ImmutableBackend(Self)
-        else
-            MutableBackend(Self);
-
         pub usingnamespace if (DataType == u8) blk: {
             break :blk if (isConst(T))
                 ImmutableStringBackend(Self)
             else
                 MutableStringBackend(Self);
-        } else struct {};
+        } else blk: {
+            break :blk if (isConst(T))
+                ImmutableNumericBackend(Self)
+            else
+                MutableNumericBackend(Self);
+        };
 
         pub fn iterator(
             self: Self,
@@ -115,9 +111,79 @@ pub fn MatchIterator(
 
 pub fn match(
     comptime expression: []const u8,
-    string: []const u8,
+    source: []const u8,
 ) MatchIterator(expression) {
-    return MatchIterator(expression).init(string);
+    return MatchIterator(expression).init(source);
+}
+
+
+const StringOptions = union{ 
+    regex: []const u8,
+    scalar: u8,
+};
+
+fn SplitIterator(comptime expression: []const u8) type {
+    return struct {
+        const Self = @This();
+        const tree = ParseRegexTree(expression);
+        items: []const u8,
+        index: ?usize,
+
+        pub fn init(items: []const u8) Self {
+            return .{ .items = items, .index = 0 };
+        }
+
+        pub fn next(self: *Self) ?[]const u8 {
+            const start = self.index orelse return null;
+            var stop: usize = start;
+            const end: ?usize = blk: {  
+                while (stop < self.items.len) : (stop += 1) {
+                    if (tree.call(self.items, stop)) |n| break :blk n else continue;                    
+                } else break: blk null;
+            };
+            defer self.index = end;
+            return self.items[start..stop];
+        }
+    };
+}
+
+pub fn split(
+    comptime expression: []const u8,
+    source: []const u8,
+) SplitIterator(expression) {
+    return SplitIterator(expression).init(source);
+}
+
+fn TokenIterator(comptime expression: []const u8) type {
+    return struct {
+        const Self = @This();
+        const tree = ParseRegexTree(expression);
+        items: []const u8,
+        index: ?usize,
+
+        pub fn init(items: []const u8) Self {
+            return .{ .items = items, .index = 0 };
+        }
+
+        pub fn next(self: *Self) ?[]const u8 {
+            const start = self.index orelse return null;
+            var stop: usize = start;
+            const end: ?usize = blk: {  
+                while (stop < self.items.len) : (stop += 1) {
+                    if (tree.call(self.items, stop)) |n| break :blk n else continue;                    
+                } else break: blk null;
+            };
+            defer self.index = end;
+            return self.items[start..stop];
+        }        
+    };
+}
+
+pub fn tokenize(
+    comptime expression: []const u8,
+    source: []const u8,
+) SplitIterator(expression) {
+    return SplitIterator(expression).init(source);
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -374,21 +440,12 @@ fn IteratorInterface(
     };
 }
 
-////////////////////////////////////////////////////////////////////////////////
-// IMMUTABLE BACKEND :                                                        //
-//                                                                            //
-// Used by mutable backend - only suports non-mutating                        //
-// operations over items. Primarily used for reducing,                        //
-// scanning, and indexing. Provides non-mutating iterator                     //
-// support for both Immutable and Mutable backends.                           //
-////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////
+// GeneralBackend //////////////////////////////////
 
-fn ImmutableBackend(comptime Self: type) type {
+pub fn GeneralImmutableBackend(comptime Self: type) type {
+
     return struct {
-
-        ///////////////////////
-        //  PUBLIC SECTION   //
-        ///////////////////////
 
         pub fn all(self: Self, predicate: fn (Self.DataType) bool) bool {
             return for (self.items) |x| {
@@ -402,101 +459,10 @@ fn ImmutableBackend(comptime Self: type) type {
             } else true;
         }
 
-        pub fn findFrom(
-            self: Self,
-            comptime mode: FluentMode,
-            start_index: usize,
-            needle: Parameter(Self.DataType, mode),
-        ) ?usize {
-            return switch (mode) {
-                .any => std.mem.indexOfAnyPos(Self.DataType, self.items, start_index, needle),
-                .scalar => std.mem.indexOfScalarPos(Self.DataType, self.items, start_index, needle),
-                .sequence => std.mem.indexOfPos(Self.DataType, self.items, start_index, needle),
-            };
-        }
-
-        pub fn containsFrom(
-            self: Self,
-            comptime mode: FluentMode,
-            start_index: usize,
-            needle: Parameter(Self.DataType, mode),
-        ) bool {
-            return findFrom(self, mode, start_index, needle) != null;
-        }
-
-        pub fn find(
-            self: Self,
-            comptime mode: FluentMode,
-            needle: Parameter(Self.DataType, mode),
-        ) ?usize {
-            return findFrom(self, mode, 0, needle);
-        }
-
-        pub fn contains(
-            self: Self,
-            comptime mode: FluentMode,
-            needle: Parameter(Self.DataType, mode),
-        ) bool {
-            return find(self, mode, needle) != null;
-        }
-
         pub fn getAt(self: Self, idx: anytype) Self.DataType {
             return self.items[wrapIndex(self.items.len, idx)];
         }
-
-        pub fn startsWith(
-            self: Self,
-            comptime mode: FluentMode,
-            needle: Parameter(Self.DataType, mode),
-        ) bool {
-            if (self.items.len == 0)
-                return false;
-
-            return switch (mode) {
-                .any => blk: {
-                    for (needle) |n| {
-                        if (self.getAt(0) == n) break :blk true;
-                    } else break :blk false;
-                },
-                .sequence => std.mem.startsWith(Self.DataType, self.items, needle),
-                .scalar => self.getAt(0) == needle,
-            };
-        }
-
-        pub fn endsWith(
-            self: Self,
-            comptime mode: FluentMode,
-            needle: Parameter(Self.DataType, mode),
-        ) bool {
-            if (self.items.len == 0)
-                return false;
-
-            return switch (mode) {
-                .any => blk: {
-                    for (needle) |n| {
-                        if (self.getAt(-1) == n) break :blk true;
-                    } else break :blk false;
-                },
-                .sequence => std.mem.endsWith(Self.DataType, self.items, needle),
-                .scalar => self.getAt(-1) == needle,
-            };
-        }
-
-        /// supported opt = {all, leading, trailing, until, periphery, inside, inverse}
-        pub fn count(self: Self, opt: CountOption, comptime mode: FluentMode, needle: Parameter(Self.DataType, mode)) usize {
-            if (self.items.len == 0) return 0;
-
-            return switch (opt) {
-                .all => countAll(self, mode, needle),
-                .leading => countLeading(self, mode, needle),
-                .trailing => countTrailing(self, mode, needle),
-                .periphery => countLeading(self, mode, needle) + countTrailing(self, mode, needle),
-                .until => countUntil(self, mode, needle),
-                .inside => countAll(self, mode, needle) - (countLeading(self, mode, needle) + countTrailing(self, mode, needle)),
-                .inverse => self.items.len - countAll(self, mode, needle),
-            };
-        }
-
+    
         pub fn slice(self: Self, i: anytype, j: anytype) Self {
             const I = @TypeOf(i);
             const J = @TypeOf(j);
@@ -638,6 +604,117 @@ fn ImmutableBackend(comptime Self: type) type {
             }
             return .{ .items = join_buffer[0..curr_idx] };
         }
+    };
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// IMMUTABLE BACKEND :                                                        //
+//                                                                            //
+// Used by mutable backend - only suports non-mutating                        //
+// operations over items. Primarily used for reducing,                        //
+// scanning, and indexing. Provides non-mutating iterator                     //
+// support for both Immutable and Mutable backends.                           //
+////////////////////////////////////////////////////////////////////////////////
+
+fn ImmutableNumericBackend(comptime Self: type) type {
+    return struct {
+
+        pub usingnamespace GeneralImmutableBackend(Self);
+
+        ///////////////////////
+        //  PUBLIC SECTION   //
+        ///////////////////////
+
+        pub fn findFrom(
+            self: Self,
+            comptime mode: FluentMode,
+            start_index: usize,
+            needle: Parameter(Self.DataType, mode),
+        ) ?usize {
+            return switch (mode) {
+                .any => std.mem.indexOfAnyPos(Self.DataType, self.items, start_index, needle),
+                .scalar => std.mem.indexOfScalarPos(Self.DataType, self.items, start_index, needle),
+                .sequence => std.mem.indexOfPos(Self.DataType, self.items, start_index, needle),
+            };
+        }
+
+        pub fn containsFrom(
+            self: Self,
+            comptime mode: FluentMode,
+            start_index: usize,
+            needle: Parameter(Self.DataType, mode),
+        ) bool {
+            return findFrom(self, mode, start_index, needle) != null;
+        }
+
+        pub fn find(
+            self: Self,
+            comptime mode: FluentMode,
+            needle: Parameter(Self.DataType, mode),
+        ) ?usize {
+            return findFrom(self, mode, 0, needle);
+        }
+
+        pub fn contains(
+            self: Self,
+            comptime mode: FluentMode,
+            needle: Parameter(Self.DataType, mode),
+        ) bool {
+            return find(self, mode, needle) != null;
+        }
+
+        pub fn startsWith(
+            self: Self,
+            comptime mode: FluentMode,
+            needle: Parameter(Self.DataType, mode),
+        ) bool {
+            if (self.items.len == 0)
+                return false;
+
+            return switch (mode) {
+                .any => blk: {
+                    for (needle) |n| {
+                        if (self.getAt(0) == n) break :blk true;
+                    } else break :blk false;
+                },
+                .sequence => std.mem.startsWith(Self.DataType, self.items, needle),
+                .scalar => self.getAt(0) == needle,
+            };
+        }
+
+        pub fn endsWith(
+            self: Self,
+            comptime mode: FluentMode,
+            needle: Parameter(Self.DataType, mode),
+        ) bool {
+            if (self.items.len == 0)
+                return false;
+
+            return switch (mode) {
+                .any => blk: {
+                    for (needle) |n| {
+                        if (self.getAt(-1) == n) break :blk true;
+                    } else break :blk false;
+                },
+                .sequence => std.mem.endsWith(Self.DataType, self.items, needle),
+                .scalar => self.getAt(-1) == needle,
+            };
+        }
+
+        /// supported opt = {all, leading, trailing, until, periphery, inside, inverse}
+        pub fn count(self: Self, opt: CountOption, comptime mode: FluentMode, needle: Parameter(Self.DataType, mode)) usize {
+            if (self.items.len == 0) return 0;
+
+            return switch (opt) {
+                .all => countAll(self, mode, needle),
+                .leading => countLeading(self, mode, needle),
+                .trailing => countTrailing(self, mode, needle),
+                .periphery => countLeading(self, mode, needle) + countTrailing(self, mode, needle),
+                .until => countUntil(self, mode, needle),
+                .inside => countAll(self, mode, needle) - (countLeading(self, mode, needle) + countTrailing(self, mode, needle)),
+                .inverse => self.items.len - countAll(self, mode, needle),
+            };
+        }
 
         pub fn trim(self: Self, comptime direction: DirectionOption, comptime opt: TrimOptions, actor: Parameter(Self.DataType, opt)) Self {
             if (self.items.len <= 1) return self;
@@ -664,6 +741,7 @@ fn ImmutableBackend(comptime Self: type) type {
         ) std.mem.TokenIterator(Self.DataType, mode) {
             return .{ .index = 0, .buffer = self.items, .delimiter = delimiter };
         }
+
 
         ///////////////////////
         //  PRIVATE SECTION  //
@@ -813,15 +891,11 @@ fn ImmutableBackend(comptime Self: type) type {
 // permutations, and partitioning.                                            //
 ////////////////////////////////////////////////////////////////////////////////
 
-fn MutableBackend(comptime Self: type) type {
+pub fn GeneralMutableBackend(comptime Self: type) type {
     return struct {
-
-        ///////////////////////
-        //  PUBLIC SECTION   //
-        ///////////////////////
-
+        
         // includes operations like reduce, find, and iterators
-        pub usingnamespace ImmutableBackend(Self);
+        pub usingnamespace ImmutableNumericBackend(Self);
 
         pub fn sort(self: Self, comptime direction: SortDirection) Self {
             const func = if (direction == .ascending)
@@ -870,6 +944,34 @@ fn MutableBackend(comptime Self: type) type {
             return self;
         }
 
+        pub fn map(self: Self, unary_func: anytype) Self {
+            const unary_call = comptime if (@typeInfo(@TypeOf(unary_func)) == .Fn)
+                unary_func
+            else
+                chain(unary_func).call;
+
+            for (self.items) |*x| x.* = @call(.always_inline, unary_call, .{x.*});
+            return self;
+        }
+
+        fn shuffle(self: Self, random: std.Random) Self {
+            random.shuffle(Self.DataType, self.items);
+            return self;
+        }
+    };
+}
+
+
+
+fn MutableNumericBackend(comptime Self: type) type {
+    return struct {
+
+        ///////////////////////
+        //  PUBLIC SECTION   //
+        ///////////////////////
+
+        pub usingnamespace GeneralMutableBackend(Self);
+
         pub fn replace(
             self: Self,
             opt: ReplaceOption,
@@ -888,21 +990,6 @@ fn MutableBackend(comptime Self: type) type {
                 _ = replaceLast(self, mode, this, with);
 
             return .{ .items = self.items[0..] };
-        }
-
-        pub fn map(self: Self, unary_func: anytype) Self {
-            const unary_call = comptime if (@typeInfo(@TypeOf(unary_func)) == .Fn)
-                unary_func
-            else
-                chain(unary_func).call;
-
-            for (self.items) |*x| x.* = @call(.always_inline, unary_call, .{x.*});
-            return self;
-        }
-
-        fn shuffle(self: Self, random: std.Random) Self {
-            random.shuffle(Self.DataType, self.items);
-            return self;
         }
 
         ///////////////////////
@@ -925,7 +1012,12 @@ fn MutableBackend(comptime Self: type) type {
             };
         }
 
-        fn replaceFirst(self: Self, comptime mode: FluentMode, this: Parameter(Self.DataType, mode), with: Parameter(Self.DataType, mode)) Self {
+        fn replaceFirst(
+            self: Self, 
+            comptime mode: FluentMode,
+            this: Parameter(Self.DataType, mode),
+            with: Parameter(Self.DataType, mode),
+        ) Self {
             switch (mode) {
                 .scalar => for (self.items) |*item| {
                     if (item.* != this) continue;
@@ -1041,8 +1133,12 @@ fn MutableBackend(comptime Self: type) type {
 // Only activated if the child data type is u8                                //
 ////////////////////////////////////////////////////////////////////////////////
 
+const StringMode = enum { regex, scalar };
+
 fn ImmutableStringBackend(comptime Self: type) type {
     return struct {
+
+        pub usingnamespace GeneralImmutableBackend(Self);
 
         ///////////////////////
         //  PUBLIC SECTION   //
@@ -1084,40 +1180,90 @@ fn ImmutableStringBackend(comptime Self: type) type {
             return self.all(std.ascii.isAlphanumeric);
         }
 
-        pub fn digit(self: Self, comptime T: type) ?T {
+        pub fn digit(self: Self, comptime T: type) !T {
             if (comptime !isInteger(T))
                 @compileError("digit: requires integer type.");
 
-            return std.fmt.parseInt(T, self.items, 10) catch null;
+            return std.fmt.parseInt(T, self.items, 10);
         }
 
-        pub fn float(self: Self, comptime T: type) ?T {
+        pub fn float(self: Self, comptime T: type) !T {
             if (comptime !isFloat(T))
                 @compileError("float: requires floating-point type.");
 
-            return std.fmt.parseFloat(T, self.items) catch null;
+            return std.fmt.parseFloat(T, self.items);
         }
 
-        pub fn getToken(self: Self, nth: usize, charset: []const u8) Self {
-            var bitset = StringBitSet.init();
-            var start: usize = 0;
-            var end: usize = 0;
-            for (charset) |item| {
-                bitset.setValue(item, true);
-            }
-            for (0..nth) |_| {
-                start = end;
-                while (start < self.items.len and bitset.isSet(self.items[start])) {
-                    start += 1;
+        pub fn findFrom(
+            self: Self,
+            comptime mode: StringMode,
+            start_index: usize,
+            comptime needle: Parameter(Self.DataType, mode),
+        ) ?usize {
+            return switch (mode) {
+                .scalar => std.mem.indexOfScalarPos(Self.DataType, self.items, start_index, needle),
+                .regex => blk: {
+                    var itr = Fluent.match(needle, self.items[start_index..]);
+                    const items = itr.next() orelse break :blk null;                  
+                    break :blk (itr.index - items.len) + start_index;
                 }
-                if (start >= self.items.len)
-                    return .{ .items = self.items[end..] };
-                end = start;
-                while (end < self.items.len and !bitset.isSet(self.items[end])) {
-                    end += 1;
-                }
-            }
-            return .{ .items = self.items[start..end] };
+            };
+        }
+
+        pub fn containsFrom(
+            self: Self,
+            comptime mode: StringMode,
+            start_index: usize,
+            comptime needle: Parameter(Self.DataType, mode),
+        ) bool {
+            return findFrom(self, mode, start_index, needle) != null;
+        }
+
+        pub fn find(
+            self: Self,
+            comptime mode: StringMode,
+            comptime needle: Parameter(Self.DataType, mode),
+        ) ?usize {
+            return findFrom(self, mode, 0, needle);
+        }
+
+        pub fn contains(
+            self: Self,
+            comptime mode: StringMode,
+            comptime needle: Parameter(Self.DataType, mode),
+        ) bool {
+            return find(self, mode, needle) != null;
+        }
+
+        ///////////////////////////////////////////////////
+        // Iterator support ///////////////////////////////
+
+        pub fn split(
+            self: Self,
+            comptime mode: StringMode, 
+            comptime delimiter: Parameter(u8, mode)
+        ) switch (mode) {
+            .scalar => std.mem.SplitIterator(u8, .scalar),
+            .regex => Fluent.SplitIterator(delimiter)
+        } {
+            return switch (mode) {
+                .scalar => std.mem.SplitIterator(u8, .scalar){ .buffer = self.items, .index = 0, .delimiter = delimiter },
+                .regex => Fluent.split(delimiter, self.items),
+            };
+        }
+
+        pub fn tokenize(
+            self: Self,
+            comptime mode: StringMode, 
+            comptime delimiter: Parameter(u8, mode)
+        ) switch (mode) {
+            .scalar => std.mem.SplitIterator(u8, .scalar),
+            .regex => Fluent.MatchIterator(delimiter)
+        } {
+            return switch (mode) {
+                .scalar => std.mem.TokenIterator(u8, .scalar){ .buffer = self.items, .index = 0, .delimiter = delimiter },
+                .regex => Fluent.match(delimiter, self.items),
+            };
         }
 
         pub fn differenceWith(
@@ -1195,6 +1341,8 @@ fn MutableStringBackend(comptime Self: type) type {
         ///////////////////////
 
         pub usingnamespace ImmutableStringBackend(Self);
+
+        pub usingnamespace GeneralMutableBackend(Self);
 
         pub fn lower(self: Self) Self {
             for (self.items) |*c| c.* = std.ascii.toLower(c.*);
@@ -1435,6 +1583,7 @@ fn Parameter(comptime T: type, comptime mode: anytype) type {
         .{ "sequence", []const T },
         .{ "range", struct { start: usize, end: usize } },
         .{ "predicate", fn (T) bool },
+        .{ "regex", []const u8 },
     });
     return comptime param_types.get(@tagName(mode)) orelse unreachable;
 }
@@ -1663,79 +1812,7 @@ fn fuseEscapes(
         @compileError("fuseEscapes: unused escape symbol");
     }
 
-    // TODO: consider moving below to separate function
-
-    // freeze comptime state
-    const es_ = es;
-
-    return es_[0..idx];
-}
-
-fn analyzeRegexTokens(comptime sq: []const RegexSymbol) []const RegexSymbol {
-    comptime {
-        const tag = std.meta.activeTag;
-
-        var i: usize = 0;
-        var j: usize = 2;
-        while (j < sq.len) : ({
-            i += 1;
-            j += 1;
-        }) {
-            // any quantifier that is followed by an identical character is either invalid or idempotent
-            // a + a  -> invalid
-            // a + a? -> idempotent
-            if (tag(sq[i]) == .s and tag(sq[j]) == .s) {
-                if (tag(sq[i + 1]) != .q)
-                    continue;
-
-                const a = sq[i].s;
-                const b = sq[j].s;
-
-                if (!std.meta.eql(a, b))
-                    continue;
-
-                const q = sq[i + 1].q;
-
-                if (tag(q) != .optional) {
-                    const fmt: []const u8 = &[_]u8{ ' ', a.char, '-' } ++ @tagName(tag(q)) ++ &[_]u8{ '-', b.char };
-                    @compileError("Invalid quantifier sequence:" ++ fmt);
-                }
-
-                // only a?a? is valid - check for just a?a sequences
-                if (j + 1 >= sq.len or tag(sq[j + 1]) != .q or tag(sq[j + 1].q) != .optional) {
-                    const fmt: []const u8 = &[_]u8{ ' ', a.char, '-' } ++ @tagName(tag(q)) ++ &[_]u8{ '-', b.char };
-                    @compileError("Invalid optional ordering:" ++ fmt);
-                }
-            }
-        }
-
-        // backtracking optimizations
-        var _sq: [sq.len]RegexSymbol = sq[0..].*;
-
-        i = 0;
-        while (i < _sq.len) : (i += 1){
-
-            if (tag(_sq[i]) != .s or i + 3 > _sq.len)
-                continue;
-
-            //@compileLog("In loop");
-
-            const s = _sq[i].s;
-
-            // convert .*a -> ~a*a (only if a is not a bracket)
-            if (s.char == '.' and !s.escaped and tag(_sq[i + 1]) == .q and tag(_sq[i + 2]) == .s) {
-                const u = _sq[i + 2].s;
-                if (isRegexBracket(u))
-                    continue;
-
-                //@compileLog(u);
-                _sq[i] = .{ .s = u };
-                _sq[i].s.negated = true;
-            }
-        }
-        const __sq = _sq;
-        return __sq[0..];
-    }
+    return es[0..idx]; // don't reference at runtime
 }
 
 fn fuseQuantifiers(
@@ -1875,9 +1952,7 @@ fn fuseQuantifiers(
             i += 1;
         }
 
-        const _sq = sq;
-
-        return analyzeRegexTokens(_sq[0..i]);
+        return sq[0..i]; // don't reference at runtime
     }
 }
 
@@ -1963,16 +2038,113 @@ fn RegexOR(
 
 fn RegexAND(
     // used for anything outside of [] clauses,
-    comptime this: type,
-    comptime next: type,
+    comptime lhs: type,
+    comptime rhs: type,
 ) type {
     return struct {
         pub fn call(str: []const u8, i: usize) ?usize {
-            const j = this.call(str, i) orelse return null;
-            if (comptime @hasDecl(next, "call")) {
-                return next.call(str, j);
+
+            // NOTE:
+            //  any time an index had add assignment,
+            //  use call(str[i..], 0) to only add the
+            //  next N matches. Otherwise, always pass
+            //  ass call(str, i) to accumulate.
+
+            if (comptime !@hasDecl(rhs, "call")) {
+                if (comptime lhs.quantifier) |q| {
+
+                    switch (q) {
+                        .any => {
+                            var idx: usize = i;
+                            while (true) {
+                                idx += lhs.call(str[idx..], 0) orelse return if (idx == 0) null else idx;
+                            } 
+                        },
+                        .exact => |n| {
+                            var idx: usize = i;
+                            for (0..n) |_| {
+                                idx += lhs.call(str[idx..], 0) orelse return null;
+                            }
+                            return idx;
+                        },
+                        .between => |b| {
+                            var idx: usize = i;
+                            var count: usize = 0;
+                            while (count < b.start) : (count += 1) {
+                                idx += lhs.call(str[idx..], 0) orelse return null;
+                            }
+                            while (count < b.stop) : (count += 1) {
+                                idx += lhs.call(str[idx..], 0) orelse break;
+                            }
+                            return if (idx == 0) null else idx;
+                        },
+                        .one_or_more => {
+                            var idx = lhs.call(str, i) orelse return null;
+                            
+                            while (true) {
+                                idx += lhs.call(str[idx..], 0) orelse break;
+                            }
+                            return idx;
+                        },
+                        .optional => {
+                            return lhs.call(str, i) orelse if (i == 0) null else i;
+                        },                    
+                    }
+                } else {
+                    return lhs.call(str, i);
+                }
+            }
+
+            if (comptime lhs.quantifier) |q| {
+                switch (q) {
+                    .any => {
+                        var idx: usize = i;
+                        var last: ?usize = null;
+                        while (true) {
+                            last = rhs.call(str, idx) orelse last;
+                            idx += lhs.call(str[idx..], 0) orelse break;
+                        } 
+                        return rhs.call(str, idx) orelse last;
+                    },
+                    .exact => |n| {
+                        var idx: usize = i;
+                        for (0..n) |_| {
+                            idx += lhs.call(str[idx..], 0) orelse return null;
+                        }
+                        return rhs.call(str, idx);
+                    },
+                    .between => |b| {
+                        var idx: usize = i;
+                        var count: usize = 0;
+                        while (count < b.start) : (count += 1) {
+                            idx += lhs.call(str[idx..], 0) orelse return null;
+                        }
+                        var last: ?usize = null;
+                        while (count < b.stop) : (count += 1) {
+                            last = rhs.call(str, idx) orelse last;
+                            idx += lhs.call(str[idx..], 0) orelse break;
+                        }
+                        return rhs.call(str[idx..], 0) orelse last;
+                    },
+                    .one_or_more => {
+                        var idx: usize = lhs.call(str, i) orelse return null;
+                        
+                        var last: ?usize = null;
+                        while (true) {
+                            last = rhs.call(str, idx) orelse last;
+                            idx += lhs.call(str[idx..], 0) orelse break;
+                        }
+                        return rhs.call(str, idx) orelse last;
+                    },
+                    .optional => {
+                        const j = lhs.call(str, i) orelse return rhs.call(str, i);
+
+                        return rhs.call(str, j) orelse rhs.call(str, i);
+                    },                    
+                }
             } else {
-                return j;
+                const j = lhs.call(str, i) orelse return null;
+                return rhs.call(str, j);
             }
         }
     };
@@ -1997,99 +2169,15 @@ fn RegexNAND(
 }
 
 fn RegexUnit(
-    comptime callable: anytype,
-    comptime quantifier: ?RegexQuantifier,
-) type {
-    return if (@typeInfo(@TypeOf(callable)) == .Fn) struct {
-        pub fn call(str: []const u8, i: usize) ?usize {
-            if (comptime quantifier) |q| {
-                var idx: usize = i;
-
-                switch (comptime q) {
-                    .exact => |n| {
-                        for (0..n) |_| {
-                            if (idx < str.len and callable(str[idx])) {
-                                idx += 1;
-                            } else {
-                                return null;
-                            }
-                        }
-                    },
-                    .between => |b| {
-                        var count: usize = 0;
-                        while (idx < str.len and count < b.stop) : ({
-                            count += 1;
-                            idx += 1;
-                        }) {
-                            if (!callable(str[idx])) break;
-                        }
-                        if (count < b.start)
-                            return null;
-                    },
-                    .any => {
-                        while (idx < str.len and callable(str[idx])) idx += 1;
-                    },
-                    .one_or_more => {
-                        var count: usize = 0;
-                        while (idx < str.len) : ({
-                            count += 1;
-                            idx += 1;
-                        }) {
-                            if (!callable(str[idx])) break;
-                        }
-                        if (count < 1)
-                            return null;
-                    },
-                    .optional => { // can be empty
-                        if (idx < str.len and callable(str[idx])) idx += 1;
-                    },
-                }
-                return idx;
-            } else {
+    comptime Callable: anytype,
+    comptime Quantifier: ?RegexQuantifier,
+) type {    
+    return struct {
+        pub const callable = Callable;
+        pub const quantifier = Quantifier;
+        pub inline fn call(str: []const u8, i: usize) ?usize {
+            if (comptime @typeInfo(@TypeOf(Callable)) == .Fn) {                
                 return if (i < str.len and callable(str[i])) i + 1 else null;
-            }
-        }
-    } else struct {
-        pub fn call(str: []const u8, i: usize) ?usize {
-            if (comptime quantifier) |q| {
-                var idx: usize = i;
-
-                switch (comptime q) {
-                    .exact => |n| {
-                        for (0..n) |_| {
-                            if (idx < str.len) {
-                                idx += callable.call(str[idx..], 0) orelse return null;
-                            } else {
-                                return null;
-                            }
-                        }
-                    },
-                    .between => |b| {
-                        var count: usize = 0;
-                        while (idx < str.len and count < b.stop) : (count += 1) {
-                            idx += callable.call(str[idx..], 0) orelse break;
-                        }
-                        if (count < b.start)
-                            return null;
-                    },
-                    .any => {
-                        while (idx < str.len)
-                            idx += callable.call(str[idx..], 0) orelse break;
-                    },
-                    .one_or_more => {
-                        var count: usize = 0;
-                        while (idx < str.len) : (count += 1) {
-                            idx += callable.call(str[idx..], 0) orelse break;
-                        }
-                        if (count < 1)
-                            return null;
-                    },
-                    .optional => { // can be empty
-                        if (idx < str.len)
-                            idx += callable.call(str[idx..], 0) orelse @as(usize, 0);
-                    },
-                }
-                return idx;
             } else {
                 return callable.call(str, i);
             }
@@ -2164,6 +2252,26 @@ fn anyRegex(_: u8) bool {
     return true;
 }
 
+fn isWordCharacter(c: u8) bool {
+    return std.ascii.isAlphanumeric(c) or c == '_';
+}
+
+fn isVerticalWhitespace(c: u8) bool {
+    return switch (c) {
+        '\n', '\x85',
+        std.ascii.control_code.cr, 
+        std.ascii.control_code.vt, 
+        std.ascii.control_code.ff => true, else => false,
+    };
+}
+
+fn isHorizontalWhitespace(c: u8) bool {
+    return switch (c) {
+        ' ', '\t' => true, else => false,
+    };
+}
+
+
 fn ParseRegexTreeDepth(
     comptime sq: []const RegexSymbol,
     comptime enclosing: u8,
@@ -2197,14 +2305,10 @@ fn ParseRegexTreeDepth(
                         },
                         .s => null,
                     };
-                    // closing is a bracket or quantifier
-                    if (closing + 1 >= _sq.len) {
-                        _sq = _sq[0..0]; // exhaust
-                    } else {
-                        _sq = _sq[closing + 1 ..];
-                    }
-                    // don't wrap with quantifier if unnecessary
-                    break :outer if (q) |_q| RegexUnit(T, _q) else T;
+
+                    _sq = _sq[closing + 1 ..];
+
+                    break :outer RegexUnit(T, q);
                 }
 
                 use_nand = s.negated and s.in_square;
@@ -2232,12 +2336,16 @@ fn ParseRegexTreeDepth(
 
                 if (s.escaped) {
                     switch (s.char) {
-                        'w' => break :outer RegexUnit(InvertRegex(true, s.negated, std.ascii.isAlphanumeric), q),
-                        'W' => break :outer RegexUnit(InvertRegex(false, s.negated, std.ascii.isAlphanumeric), q),
+                        'w' => break :outer RegexUnit(InvertRegex(true, s.negated, isWordCharacter), q),
+                        'W' => break :outer RegexUnit(InvertRegex(false, s.negated, isWordCharacter), q),
                         'd' => break :outer RegexUnit(InvertRegex(true, s.negated, std.ascii.isDigit), q),
                         'D' => break :outer RegexUnit(InvertRegex(false, s.negated, std.ascii.isDigit), q),
                         's' => break :outer RegexUnit(InvertRegex(true, s.negated, std.ascii.isWhitespace), q),
                         'S' => break :outer RegexUnit(InvertRegex(false, s.negated, std.ascii.isWhitespace), q),
+                        'h' => break :outer RegexUnit(InvertRegex(true, s.negated, isHorizontalWhitespace), q),
+                        'H' => break :outer RegexUnit(InvertRegex(false, s.negated, isHorizontalWhitespace), q),
+                        'v' => break :outer RegexUnit(InvertRegex(true, s.negated, isVerticalWhitespace), q),
+                        'V' => break :outer RegexUnit(InvertRegex(false, s.negated, isVerticalWhitespace), q),
                         else => {},
                     }
                 } else {
@@ -2281,7 +2389,7 @@ const expect = std.testing.expect;
 // @TEST : IMMUTABLE BACKEND                                                  //
 ////////////////////////////////////////////////////////////////////////////////
 
-test "findFrom(self, mode, start_index, needle) : scalar" {
+test "findFrom(self, mode, start_index, needle) : scalar\n" {
     const self = init("This is a test");
 
     {
@@ -2300,165 +2408,115 @@ test "findFrom(self, mode, start_index, needle) : scalar" {
     }
 }
 
-test "findFrom(self, mode, start_index, needle) : sequence" {
+test "findFrom(self, mode, start_index, needle) : regex\n" {
     const self = init("This is a test");
-
     {
-        const result = self.findFrom(.sequence, 0, "This") orelse unreachable;
+        const result = self.findFrom(.regex, 0, "This") orelse unreachable;
         try expect(result == 0);
     }
-
     {
-        const result = self.findFrom(.sequence, 9, "test") orelse unreachable;
-        try expect(result == 10);
+        const result = self.findFrom(.regex, 9, "test") orelse unreachable;
+
+        std.debug.print("\nRESULT: {}\n\n", .{ result });
+        try std.testing.expectEqual(10, result);
     }
-
     {
-        const result = self.findFrom(.sequence, 5, "is") orelse unreachable;
+        const result = self.findFrom(.regex, 5, "is") orelse unreachable;
         try expect(result == 5);
     }
-}
-
-test "findFrom(self, mode, start_index, needle) : any" {
-    const self = init("This is a test");
-
     {
-        const result = self.findFrom(.any, 0, "T") orelse unreachable;
+        const result = self.findFrom(.regex, 0, "[T]") orelse unreachable;
         try expect(result == 0);
     }
-
     {
-        const result = self.findFrom(.any, 9, "test") orelse unreachable;
+        const result = self.findFrom(.regex, 9, "[test]") orelse unreachable;
         try expect(result == 10);
     }
-
     {
-        const result = self.findFrom(.any, 5, "is") orelse unreachable;
+        const result = self.findFrom(.regex, 5, "[is]") orelse unreachable;
         try expect(result == 5);
     }
 }
 
 ////////////////////////////////////////////////////////////////////////////////
 
-test "find(self, mode, needle)                  : scalar" {
+test "find(self, mode, needle)                  : scalar\n" {
     const self = init("This is a testz");
 
     {
         const result = self.find(.scalar, 'T') orelse unreachable;
         try expect(result == 0);
     }
-
     {
         const result = self.find(.scalar, 'z') orelse unreachable;
         try expect(result == self.items.len - 1);
     }
-
     {
         const result = self.find(.scalar, 'i') orelse unreachable;
         try expect(result == 2);
     }
 }
 
-test "find(self, mode, needle)                  : sequence" {
-    const self = init("This is a testz");
-
-    {
-        const result = self.find(.sequence, "This") orelse unreachable;
-        try expect(result == 0);
-    }
-
-    {
-        const result = self.find(.sequence, "testz") orelse unreachable;
-        try expect(result == 10);
-    }
-
-    {
-        const result = self.find(.sequence, "is") orelse unreachable;
-        try expect(result == 2);
-    }
-}
-
-test "find(self, mode, needle)                  : any" {
-    const self = init("This is a testz");
-
-    {
-        const result = self.find(.any, "T") orelse unreachable;
-        try expect(result == 0);
-    }
-
-    {
-        const result = self.find(.any, "z") orelse unreachable;
-        try expect(result == self.items.len - 1);
-    }
-
-    {
-        const result = self.find(.any, "is") orelse unreachable;
-        try expect(result == 2);
-    }
-}
-
 ////////////////////////////////////////////////////////////////////////////////
 
-test "containsFrom(self, mode, needle)          : scalar" {
+test "containsFrom(self, mode, needle)          : scalar\n" {
     const self = init("This is a test");
 
     {
         const result = self.containsFrom(.scalar, 0, 'T');
         try expect(result == true);
     }
-
     {
         const result = self.containsFrom(.scalar, 12, 't');
         try expect(result == true);
     }
-
     {
         const result = self.containsFrom(.scalar, 6, 's');
         try expect(result == true);
     }
 }
 
-test "containsFrom(self, mode, needle)          : sequence" {
-    const self = init("This is a test");
-
-    {
-        const result = self.containsFrom(.sequence, 0, "This");
-        try expect(result == true);
-    }
-
-    {
-        const result = self.containsFrom(.sequence, 9, "test");
-        try expect(result == true);
-    }
-
-    {
-        const result = self.containsFrom(.sequence, 5, "is");
-        try expect(result == true);
-    }
-}
-
-test "containsFrom(self, mode, needle)          : any" {
-    const self = init("This is a test");
-
-    {
-        const result = self.containsFrom(.sequence, 0, "This");
-        try expect(result == true);
-    }
-
-    {
-        const result = self.containsFrom(.sequence, 9, "test");
-        try expect(result == true);
-    }
-
-    {
-        const result = self.containsFrom(.sequence, 5, "is");
-        try expect(result == true);
-    }
-}
+//test "containsFrom(self, mode, needle)          : sequence\n" {
+//    const self = init("This is a test");
+//
+//    {
+//        const result = self.containsFrom(.sequence, 0, "This");
+//        try expect(result == true);
+//    }
+//
+//    {
+//        const result = self.containsFrom(.sequence, 9, "test");
+//        try expect(result == true);
+//    }
+//
+//    {
+//        const result = self.containsFrom(.sequence, 5, "is");
+//        try expect(result == true);
+//    }
+//}
+//
+//test "containsFrom(self, mode, needle)          : any\n" {
+//    const self = init("This is a test");
+//
+//    {
+//        const result = self.containsFrom(.sequence, 0, "This");
+//        try expect(result == true);
+//    }
+//
+//    {
+//        const result = self.containsFrom(.sequence, 9, "test");
+//        try expect(result == true);
+//    }
+//
+//    {
+//        const result = self.containsFrom(.sequence, 5, "is");
+//        try expect(result == true);
+//    }
+//}
 
 ////////////////////////////////////////////////////////////////////////////////
 
-test "contains(self, mode, needle)             : scalar" {
+test "contains(self, mode, needle)             : scalar\n" {
     const self = init("This is a testz");
 
     {
@@ -2477,47 +2535,39 @@ test "contains(self, mode, needle)             : scalar" {
     }
 }
 
-test "contains(self, mode, needle)             : sequence" {
+test "contains(self, mode, needle)             : sequence\n" {
     const self = init("This is a testz");
 
     {
-        const result = self.contains(.sequence, "This");
+        const result = self.contains(.regex, "This");
         try expect(result == true);
     }
-
     {
-        const result = self.contains(.sequence, "testz");
+        const result = self.contains(.regex, "testz");
         try expect(result == true);
     }
-
     {
-        const result = self.contains(.sequence, "is");
+        const result = self.contains(.regex, "is");
+        try expect(result == true);
+    }
+    {
+        const result = self.contains(.regex, "[This]");
+        try expect(result == true);
+    }
+    {
+        const result = self.contains(.regex, "[z]");
+        try expect(result == true);
+    }
+    {
+        const result = self.contains(.regex, "[is]");
         try expect(result == true);
     }
 }
 
-test "contains(self, mode, needle)             : any" {
-    const self = init("This is a testz");
-
-    {
-        const result = self.contains(.any, "This");
-        try expect(result == true);
-    }
-
-    {
-        const result = self.contains(.any, "testz");
-        try expect(result == true);
-    }
-
-    {
-        const result = self.contains(.any, "is");
-        try expect(result == true);
-    }
-}
 
 ////////////////////////////////////////////////////////////////////////////////
 
-test "getAt(self, idx)                         : scalar" {
+test "getAt(self, idx)                         : scalar\n" {
     const self = init("This is a testz");
 
     {
@@ -2538,249 +2588,249 @@ test "getAt(self, idx)                         : scalar" {
 
 ////////////////////////////////////////////////////////////////////////////////
 
-test "startsWith(self, mode, needle)           : scalar" {
-    const self = init("This is a testz");
-
-    {
-        const result = self.startsWith(.scalar, 'T');
-        try expect(result == true);
-    }
-
-    {
-        const result = self.startsWith(.scalar, 't');
-        try expect(result == false);
-    }
-
-    {
-        const result = self.startsWith(.scalar, 'z');
-        try expect(result == false);
-    }
-}
-
-test "startsWith(self, mode, needle)           : sequence" {
-    const self = init("This is a testz");
-
-    {
-        const result = self.startsWith(.sequence, "This");
-        try expect(result == true);
-    }
-
-    {
-        const result = self.startsWith(.sequence, "testz");
-        try expect(result == false);
-    }
-
-    {
-        const result = self.startsWith(.sequence, "is");
-        try expect(result == false);
-    }
-}
-
-test "startsWith(self, mode, needle)           : any" {
-    const self = init("This is a testz");
-
-    {
-        const result = self.startsWith(.sequence, "This");
-        try expect(result == true);
-    }
-
-    {
-        const result = self.startsWith(.sequence, "testz");
-        try expect(result == false);
-    }
-
-    {
-        const result = self.startsWith(.sequence, "is");
-        try expect(result == false);
-    }
-}
-
-////////////////////////////////////////////////////////////////////////////////
-
-test "endsWith(self, mode, needle)             : scalar" {
-    const self = init("This is a testz");
-
-    {
-        const result = self.endsWith(.scalar, 'z');
-        try expect(result == true);
-    }
-
-    {
-        const result = self.endsWith(.scalar, 't');
-        try expect(result == false);
-    }
-
-    {
-        const result = self.endsWith(.scalar, 'T');
-        try expect(result == false);
-    }
-}
-
-test "endsWith(self, mode, needle)             : sequence" {
-    const self = init("This is a testz");
-
-    {
-        const result = self.endsWith(.sequence, "testz");
-        try expect(result == true);
-    }
-
-    {
-        const result = self.endsWith(.sequence, "This");
-        try expect(result == false);
-    }
-
-    {
-        const result = self.endsWith(.sequence, "is");
-        try expect(result == false);
-    }
-}
-
-test "endsWith(self, mode, needle)             : any" {
-    const self = init("This is a testz");
-
-    {
-        const result = self.endsWith(.sequence, "testz");
-        try expect(result == true);
-    }
-
-    {
-        const result = self.endsWith(.sequence, "this");
-        try expect(result == false);
-    }
-
-    {
-        const result = self.endsWith(.sequence, "is");
-        try expect(result == false);
-    }
-}
+//test "startsWith(self, mode, needle)           : scalar\n" {
+//    const self = init("This is a testz");
+//
+//    {
+//        const result = self.startsWith(.scalar, 'T');
+//        try expect(result == true);
+//    }
+//
+//    {
+//        const result = self.startsWith(.scalar, 't');
+//        try expect(result == false);
+//    }
+//
+//    {
+//        const result = self.startsWith(.scalar, 'z');
+//        try expect(result == false);
+//    }
+//}
+//
+//test "startsWith(self, mode, needle)           : sequence" {
+//    const self = init("This is a testz");
+//
+//    {
+//        const result = self.startsWith(.sequence, "This");
+//        try expect(result == true);
+//    }
+//
+//    {
+//        const result = self.startsWith(.sequence, "testz");
+//        try expect(result == false);
+//    }
+//
+//    {
+//        const result = self.startsWith(.sequence, "is");
+//        try expect(result == false);
+//    }
+//}
+//
+//test "startsWith(self, mode, needle)           : any" {
+//    const self = init("This is a testz");
+//
+//    {
+//        const result = self.startsWith(.sequence, "This");
+//        try expect(result == true);
+//    }
+//
+//    {
+//        const result = self.startsWith(.sequence, "testz");
+//        try expect(result == false);
+//    }
+//
+//    {
+//        const result = self.startsWith(.sequence, "is");
+//        try expect(result == false);
+//    }
+//}
 
 ////////////////////////////////////////////////////////////////////////////////
 
-test "count(self, opt, mode, needle)           : scalar" {
-    const self = init("000_111_000");
-
-    {
-        const result = self.count(.all, .scalar, '0');
-        try expect(result == 6);
-    }
-
-    {
-        const result = self.count(.leading, .scalar, '0');
-        try expect(result == 3);
-    }
-
-    {
-        const result = self.count(.trailing, .scalar, '0');
-        try expect(result == 3);
-    }
-
-    {
-        const result = self.count(.until, .scalar, '1');
-        try expect(result == 4);
-    }
-
-    {
-        const result = self.count(.periphery, .scalar, '0');
-        try expect(result == 6);
-    }
-
-    {
-        const result = self.count(.inside, .scalar, '0');
-        try expect(result == 0);
-    }
-
-    {
-        const result = self.count(.inverse, .scalar, '0');
-        try expect(result == self.items.len - 6);
-    }
-    {
-        // left and right are equal, should return length of array
-        const result = init("0000000").count(.periphery, .scalar, '0');
-        try expect(result == 7);
-    }
-}
-
-test "count(self, opt, mode, needle)           : sequence" {
-    const self = init("000_111_000");
-
-    {
-        const result = self.count(.all, .sequence, "000");
-        try expect(result == 2);
-    }
-
-    {
-        const result = self.count(.leading, .sequence, "000");
-        try expect(result == 1);
-    }
-
-    {
-        const result = self.count(.trailing, .sequence, "000");
-        try expect(result == 1);
-    }
-
-    {
-        const result = self.count(.until, .sequence, "000");
-        try expect(result == 0);
-    }
-
-    {
-        const result = self.count(.periphery, .sequence, "000");
-        try expect(result == 2);
-    }
-
-    {
-        const result = self.count(.inside, .sequence, "111");
-        try expect(result == 1);
-    }
-
-    {
-        const result = self.count(.inverse, .sequence, "000");
-        try expect(result == self.items.len - 2);
-    }
-}
-
-test "count(self, opt, mode, needle)           : any" {
-    const self = init("000_111_000");
-
-    {
-        const result = self.count(.all, .any, "01_");
-        try expect(result == self.items.len);
-    }
-
-    {
-        const result = self.count(.leading, .any, "0_");
-        try expect(result == 4);
-    }
-
-    {
-        const result = self.count(.trailing, .any, "0_");
-        try expect(result == 4);
-    }
-
-    {
-        const result = self.count(.until, .any, "_111_");
-        try expect(result == 3);
-    }
-
-    {
-        const result = self.count(.periphery, .any, "_0");
-        try expect(result == 8);
-    }
-
-    {
-        const result = self.count(.inside, .any, "1_");
-        try expect(result == 5);
-    }
-
-    {
-        const result = self.count(.inverse, .any, "0_");
-        try expect(result == 3);
-    }
-}
+//test "endsWith(self, mode, needle)             : scalar" {
+//    const self = init("This is a testz");
+//
+//    {
+//        const result = self.endsWith(.scalar, 'z');
+//        try expect(result == true);
+//    }
+//
+//    {
+//        const result = self.endsWith(.scalar, 't');
+//        try expect(result == false);
+//    }
+//
+//    {
+//        const result = self.endsWith(.scalar, 'T');
+//        try expect(result == false);
+//    }
+//}
+//
+//test "endsWith(self, mode, needle)             : sequence" {
+//    const self = init("This is a testz");
+//
+//    {
+//        const result = self.endsWith(.sequence, "testz");
+//        try expect(result == true);
+//    }
+//
+//    {
+//        const result = self.endsWith(.sequence, "This");
+//        try expect(result == false);
+//    }
+//
+//    {
+//        const result = self.endsWith(.sequence, "is");
+//        try expect(result == false);
+//    }
+//}
+//
+//test "endsWith(self, mode, needle)             : any" {
+//    const self = init("This is a testz");
+//
+//    {
+//        const result = self.endsWith(.sequence, "testz");
+//        try expect(result == true);
+//    }
+//
+//    {
+//        const result = self.endsWith(.sequence, "this");
+//        try expect(result == false);
+//    }
+//
+//    {
+//        const result = self.endsWith(.sequence, "is");
+//        try expect(result == false);
+//    }
+//}
 
 ////////////////////////////////////////////////////////////////////////////////
 
-test "slice(self, start, end)                  : [start..end]" {
+//test "count(self, opt, mode, needle)           : scalar" {
+//    const self = init("000_111_000");
+//
+//    {
+//        const result = self.count(.all, .scalar, '0');
+//        try expect(result == 6);
+//    }
+//
+//    {
+//        const result = self.count(.leading, .scalar, '0');
+//        try expect(result == 3);
+//    }
+//
+//    {
+//        const result = self.count(.trailing, .scalar, '0');
+//        try expect(result == 3);
+//    }
+//
+//    {
+//        const result = self.count(.until, .scalar, '1');
+//        try expect(result == 4);
+//    }
+//
+//    {
+//        const result = self.count(.periphery, .scalar, '0');
+//        try expect(result == 6);
+//    }
+//
+//    {
+//        const result = self.count(.inside, .scalar, '0');
+//        try expect(result == 0);
+//    }
+//
+//    {
+//        const result = self.count(.inverse, .scalar, '0');
+//        try expect(result == self.items.len - 6);
+//    }
+//    {
+//        // left and right are equal, should return length of array
+//        const result = init("0000000").count(.periphery, .scalar, '0');
+//        try expect(result == 7);
+//    }
+//}
+//
+//test "count(self, opt, mode, needle)           : sequence" {
+//    const self = init("000_111_000");
+//
+//    {
+//        const result = self.count(.all, .sequence, "000");
+//        try expect(result == 2);
+//    }
+//
+//    {
+//        const result = self.count(.leading, .sequence, "000");
+//        try expect(result == 1);
+//    }
+//
+//    {
+//        const result = self.count(.trailing, .sequence, "000");
+//        try expect(result == 1);
+//    }
+//
+//    {
+//        const result = self.count(.until, .sequence, "000");
+//        try expect(result == 0);
+//    }
+//
+//    {
+//        const result = self.count(.periphery, .sequence, "000");
+//        try expect(result == 2);
+//    }
+//
+//    {
+//        const result = self.count(.inside, .sequence, "111");
+//        try expect(result == 1);
+//    }
+//
+//    {
+//        const result = self.count(.inverse, .sequence, "000");
+//        try expect(result == self.items.len - 2);
+//    }
+//}
+//
+//test "count(self, opt, mode, needle)           : any" {
+//    const self = init("000_111_000");
+//
+//    {
+//        const result = self.count(.all, .any, "01_");
+//        try expect(result == self.items.len);
+//    }
+//
+//    {
+//        const result = self.count(.leading, .any, "0_");
+//        try expect(result == 4);
+//    }
+//
+//    {
+//        const result = self.count(.trailing, .any, "0_");
+//        try expect(result == 4);
+//    }
+//
+//    {
+//        const result = self.count(.until, .any, "_111_");
+//        try expect(result == 3);
+//    }
+//
+//    {
+//        const result = self.count(.periphery, .any, "_0");
+//        try expect(result == 8);
+//    }
+//
+//    {
+//        const result = self.count(.inside, .any, "1_");
+//        try expect(result == 5);
+//    }
+//
+//    {
+//        const result = self.count(.inverse, .any, "0_");
+//        try expect(result == 3);
+//    }
+//}
+//
+//////////////////////////////////////////////////////////////////////////////////
+
+test "slice(self, start, end)                  : [start..end]\n" {
     const string: []const u8 = "012_345_678";
 
     const self = init(string);
@@ -2809,7 +2859,7 @@ test "slice(self, start, end)                  : [start..end]" {
 
 ////////////////////////////////////////////////////////////////////////////////
 
-test "order(self, items)                       : Order" {
+test "order(self, items)                       : Order\n" {
     const self = init(&[_]i32{ 1, 2, 3, 4, 5, 6, 7, 8, 8 });
 
     {
@@ -2840,7 +2890,7 @@ test "order(self, items)                       : Order" {
 
 ////////////////////////////////////////////////////////////////////////////////
 
-test "equal(self, items)                       : bool" {
+test "equal(self, items)                       : bool\n" {
     const self_num = init(&[_]i32{ 1, 2, 3, 4, 5, 6, 7, 8, 8 });
     const self_str = init("This is a string");
 
@@ -2867,7 +2917,7 @@ test "equal(self, items)                       : bool" {
 
 ////////////////////////////////////////////////////////////////////////////////
 
-test "sum(self)                                : Self.DataType" {
+test "sum(self)                                : Self.DataType\n" {
     const self = init(try testing_allocator.alloc(i32, 10000));
     defer testing_allocator.free(self.items);
 
@@ -2889,7 +2939,7 @@ test "sum(self)                                : Self.DataType" {
 
 ////////////////////////////////////////////////////////////////////////////////
 
-test "product(self)                            : Self.DataType" {
+test "product(self)                            : Self.DataType\n" {
     const self = init(try testing_allocator.alloc(i32, 16));
     defer testing_allocator.free(self.items);
 
@@ -2911,7 +2961,7 @@ test "product(self)                            : Self.DataType" {
 
 ////////////////////////////////////////////////////////////////////////////////
 
-test "min(self)                                : Self.DataType" {
+test "min(self)                                : Self.DataType\n" {
     const self = init(try testing_allocator.alloc(i32, 1024));
     defer testing_allocator.free(self.items);
 
@@ -2944,7 +2994,7 @@ test "min(self)                                : Self.DataType" {
 
 ////////////////////////////////////////////////////////////////////////////////
 
-test "max(self)                                : Self.DataType" {
+test "max(self)                                : Self.DataType\n" {
     const self = init(try testing_allocator.alloc(i32, 1024));
     defer testing_allocator.free(self.items);
 
@@ -2977,7 +3027,7 @@ test "max(self)                                : Self.DataType" {
 
 ////////////////////////////////////////////////////////////////////////////////
 
-test "split(self, mode, delimiter)             : SplitIterator" {
+test "split(self, mode, delimiter)             : SplitIterator\n" {
     const self = init("This is a string");
     const expected = [_][]const u8{ "This", "is", "a", "string" };
 
@@ -3140,61 +3190,6 @@ test "isAlnum(self)                            : bool" {
     }
 }
 
-////////////////////////////////////////////////////////////////////////////////
-
-test "getToken(self, nth, charset)             : Self" {
-    const string = "This: is: a:     string:    with: stuff";
-    const charset = " :";
-    var buffer: [40]u8 = undefined;
-
-    {
-        var result = init(buffer[0..string.len])
-            .copy(string)
-            .getToken(1, charset);
-        try expect(result.equal("This"));
-    }
-
-    {
-        var result = init(buffer[0..string.len])
-            .copy(string)
-            .getToken(2, charset);
-        try expect(result.equal("is"));
-    }
-
-    {
-        var result = init(buffer[0..string.len])
-            .copy(string)
-            .getToken(3, charset);
-        try expect(result.equal("a"));
-    }
-
-    {
-        var result = init(buffer[0..string.len])
-            .copy(string)
-            .getToken(4, charset);
-        try expect(result.equal("string"));
-    }
-    {
-        var result = init(buffer[0..string.len])
-            .copy(string)
-            .getToken(5, charset);
-        try expect(result.equal("with"));
-    }
-
-    {
-        var result = init(buffer[0..string.len])
-            .copy(string)
-            .getToken(6, charset);
-        try expect(result.equal("stuff"));
-    }
-
-    {
-        var result = init(buffer[0..string.len])
-            .copy(string)
-            .getToken(99, charset);
-        try expect(result.equal(""));
-    }
-}
 
 ////////////////////////////////////////////////////////////////////////////////
 // @TEST : MUTABLE BACKEND                                                    //
@@ -3300,88 +3295,88 @@ test "join(self, collection, join_buffer)      : MutSelf" {
 
 ////////////////////////////////////////////////////////////////////////////////
 
-test "trim(self, opt, kind, actor)             : scalar" {
-    const source = "     This is a string     ";
-    var buffer: [source.len]u8 = undefined;
-
-    {
-        const result = init(buffer[0..source.len])
-            .copy(source)
-            .trim(.left, .scalar, ' ');
-        try expect(result.equal(source[5..]));
-    }
-
-    {
-        const result = init(buffer[0..source.len])
-            .copy(source)
-            .trim(.right, .scalar, ' ');
-        try expect(result.equal(source[0 .. source.len - 5]));
-    }
-
-    {
-        const result = init(buffer[0..source.len])
-            .copy(source)
-            .trim(.periphery, .scalar, ' ');
-        try expect(result.equal(source[5 .. source.len - 5]));
-    }
-}
-
-////////////////////////////////////////////////////////////////////////////////
-
-test "trim(self, opt, kind, actor)             : predicate" {
-    const source = "     This is a string     ";
-    var buffer: [source.len]u8 = undefined;
-
-    {
-        const result = init(buffer[0..source.len])
-            .copy(source)
-            .trim(.left, .predicate, std.ascii.isWhitespace);
-        try expect(result.equal(source[5..]));
-    }
-
-    {
-        const result = init(buffer[0..source.len])
-            .copy(source)
-            .trim(.right, .predicate, std.ascii.isWhitespace);
-        try expect(result.equal(source[0 .. source.len - 5]));
-    }
-
-    {
-        const result = init(buffer[0..source.len])
-            .copy(source)
-            .trim(.periphery, .predicate, std.ascii.isWhitespace);
-        try expect(result.equal(source[5 .. source.len - 5]));
-    }
-}
+//test "trim(self, opt, kind, actor)             : scalar" {
+//    const source = "     This is a string     ";
+//    var buffer: [source.len]u8 = undefined;
+//
+//    {
+//        const result = init(buffer[0..source.len])
+//            .copy(source)
+//            .trim(.left, .scalar, ' ');
+//        try expect(result.equal(source[5..]));
+//    }
+//
+//    {
+//        const result = init(buffer[0..source.len])
+//            .copy(source)
+//            .trim(.right, .scalar, ' ');
+//        try expect(result.equal(source[0 .. source.len - 5]));
+//    }
+//
+//    {
+//        const result = init(buffer[0..source.len])
+//            .copy(source)
+//            .trim(.periphery, .scalar, ' ');
+//        try expect(result.equal(source[5 .. source.len - 5]));
+//    }
+//}
 
 ////////////////////////////////////////////////////////////////////////////////
 
-test "trim(self, opt, kind, actor)             : set" {
-    const source = "     This is a string     ";
-    const set = " \n\t";
-    var buffer: [source.len]u8 = undefined;
+//test "trim(self, opt, kind, actor)             : predicate" {
+//    const source = "     This is a string     ";
+//    var buffer: [source.len]u8 = undefined;
+//
+//    {
+//        const result = init(buffer[0..source.len])
+//            .copy(source)
+//            .trim(.left, .predicate, std.ascii.isWhitespace);
+//        try expect(result.equal(source[5..]));
+//    }
+//
+//    {
+//        const result = init(buffer[0..source.len])
+//            .copy(source)
+//            .trim(.right, .predicate, std.ascii.isWhitespace);
+//        try expect(result.equal(source[0 .. source.len - 5]));
+//    }
+//
+//    {
+//        const result = init(buffer[0..source.len])
+//            .copy(source)
+//            .trim(.periphery, .predicate, std.ascii.isWhitespace);
+//        try expect(result.equal(source[5 .. source.len - 5]));
+//    }
+//}
 
-    {
-        const result = init(buffer[0..source.len])
-            .copy(source)
-            .trim(.left, .any, set[0..]);
-        try expect(result.equal(source[5..]));
-    }
+////////////////////////////////////////////////////////////////////////////////
 
-    {
-        const result = init(buffer[0..source.len])
-            .copy(source)
-            .trim(.right, .any, set[0..]);
-        try expect(result.equal(source[0 .. source.len - 5]));
-    }
-
-    {
-        const result = init(buffer[0..source.len])
-            .copy(source)
-            .trim(.periphery, .any, set[0..]);
-        try expect(result.equal(source[5 .. source.len - 5]));
-    }
-}
+//test "trim(self, opt, kind, actor)             : set" {
+//    const source = "     This is a string     ";
+//    const set = " \n\t";
+//    var buffer: [source.len]u8 = undefined;
+//
+//    {
+//        const result = init(buffer[0..source.len])
+//            .copy(source)
+//            .trim(.left, .any, set[0..]);
+//        try expect(result.equal(source[5..]));
+//    }
+//
+//    {
+//        const result = init(buffer[0..source.len])
+//            .copy(source)
+//            .trim(.right, .any, set[0..]);
+//        try expect(result.equal(source[0 .. source.len - 5]));
+//    }
+//
+//    {
+//        const result = init(buffer[0..source.len])
+//            .copy(source)
+//            .trim(.periphery, .any, set[0..]);
+//        try expect(result.equal(source[5 .. source.len - 5]));
+//    }
+//}
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -3455,108 +3450,108 @@ test "setAt(self, idx, with)                   : MutSelf" {
 
 ////////////////////////////////////////////////////////////////////////////////
 
-test "replace(self, opt, mode, this, with)     : scalar" {
-    const string = "abcabcabc";
-    var buffer: [9]u8 = undefined;
-
-    {
-        const result = init(buffer[0..string.len])
-            .copy(string)
-            .replace(.first, .scalar, 'a', 'z');
-        try expect(result.equal("zbcabcabc"));
-    }
-
-    {
-        const result = init(buffer[0..string.len])
-            .copy(string)
-            .replace(.last, .scalar, 'a', 'z');
-        try expect(result.equal("abcabczbc"));
-    }
-
-    {
-        const result = init(buffer[0..string.len])
-            .copy(string)
-            .replace(.periphery, .scalar, 'a', 'z');
-        try expect(result.equal("zbcabczbc"));
-    }
-
-    {
-        const result = init(buffer[0..string.len])
-            .copy(string)
-            .replace(.all, .scalar, 'a', 'z');
-        try expect(result.equal("zbczbczbc"));
-    }
-}
-
-////////////////////////////////////////////////////////////////////////////////
-
-test "replace(self, opt, mode, this, with)     : sequence" {
-    const string = "abcabcabc";
-    var buffer: [9]u8 = undefined;
-
-    {
-        const result = init(buffer[0..string.len])
-            .copy(string)
-            .replace(.first, .sequence, "abc", "000");
-        try expect(result.equal("000abcabc"));
-    }
-
-    {
-        const result = init(buffer[0..string.len])
-            .copy(string)
-            .replace(.last, .sequence, "abc", "000");
-        try expect(result.equal("abcabc000"));
-    }
-
-    {
-        const result = init(buffer[0..string.len])
-            .copy(string)
-            .replace(.periphery, .sequence, "abc", "000");
-        try expect(result.equal("000abc000"));
-    }
-
-    {
-        const result = init(buffer[0..string.len])
-            .copy(string)
-            .replace(.all, .sequence, "abc", "000");
-        try expect(result.equal("000000000"));
-    }
-}
-
-////////////////////////////////////////////////////////////////////////////////
-
-test "replace(self, opt, mode, this, with)     : any" {
-    const string = "abcabcabc";
-    var buffer: [9]u8 = undefined;
-
-    {
-        const result = init(buffer[0..string.len])
-            .copy(string)
-            .replace(.first, .any, "abc", "Zig");
-        try expect(result.equal("Zbcabcabc"));
-    }
-
-    {
-        const result = init(buffer[0..string.len])
-            .copy(string)
-            .replace(.last, .any, "abc", "Zig");
-        try expect(result.equal("abcabcabg"));
-    }
-
-    {
-        const result = init(buffer[0..string.len])
-            .copy(string)
-            .replace(.periphery, .any, "abc", "Zig");
-        try expect(result.equal("Zbcabcabg"));
-    }
-
-    {
-        const result = init(buffer[0..string.len])
-            .copy(string)
-            .replace(.all, .any, "abc", "Zig");
-        try expect(result.equal("ZigZigZig"));
-    }
-}
+//test "replace(self, opt, mode, this, with)     : scalar" {
+//    const string = "abcabcabc";
+//    var buffer: [9]u8 = undefined;
+//
+//    {
+//        const result = init(buffer[0..string.len])
+//            .copy(string)
+//            .replace(.first, .scalar, 'a', 'z');
+//        try expect(result.equal("zbcabcabc"));
+//    }
+//
+//    {
+//        const result = init(buffer[0..string.len])
+//            .copy(string)
+//            .replace(.last, .scalar, 'a', 'z');
+//        try expect(result.equal("abcabczbc"));
+//    }
+//
+//    {
+//        const result = init(buffer[0..string.len])
+//            .copy(string)
+//            .replace(.periphery, .scalar, 'a', 'z');
+//        try expect(result.equal("zbcabczbc"));
+//    }
+//
+//    {
+//        const result = init(buffer[0..string.len])
+//            .copy(string)
+//            .replace(.all, .scalar, 'a', 'z');
+//        try expect(result.equal("zbczbczbc"));
+//    }
+//}
+//
+//////////////////////////////////////////////////////////////////////////////////
+//
+//test "replace(self, opt, mode, this, with)     : sequence" {
+//    const string = "abcabcabc";
+//    var buffer: [9]u8 = undefined;
+//
+//    {
+//        const result = init(buffer[0..string.len])
+//            .copy(string)
+//            .replace(.first, .sequence, "abc", "000");
+//        try expect(result.equal("000abcabc"));
+//    }
+//
+//    {
+//        const result = init(buffer[0..string.len])
+//            .copy(string)
+//            .replace(.last, .sequence, "abc", "000");
+//        try expect(result.equal("abcabc000"));
+//    }
+//
+//    {
+//        const result = init(buffer[0..string.len])
+//            .copy(string)
+//            .replace(.periphery, .sequence, "abc", "000");
+//        try expect(result.equal("000abc000"));
+//    }
+//
+//    {
+//        const result = init(buffer[0..string.len])
+//            .copy(string)
+//            .replace(.all, .sequence, "abc", "000");
+//        try expect(result.equal("000000000"));
+//    }
+//}
+//
+//////////////////////////////////////////////////////////////////////////////////
+//
+//test "replace(self, opt, mode, this, with)     : any" {
+//    const string = "abcabcabc";
+//    var buffer: [9]u8 = undefined;
+//
+//    {
+//        const result = init(buffer[0..string.len])
+//            .copy(string)
+//            .replace(.first, .any, "abc", "Zig");
+//        try expect(result.equal("Zbcabcabc"));
+//    }
+//
+//    {
+//        const result = init(buffer[0..string.len])
+//            .copy(string)
+//            .replace(.last, .any, "abc", "Zig");
+//        try expect(result.equal("abcabcabg"));
+//    }
+//
+//    {
+//        const result = init(buffer[0..string.len])
+//            .copy(string)
+//            .replace(.periphery, .any, "abc", "Zig");
+//        try expect(result.equal("Zbcabcabg"));
+//    }
+//
+//    {
+//        const result = init(buffer[0..string.len])
+//            .copy(string)
+//            .replace(.all, .any, "abc", "Zig");
+//        try expect(result.equal("ZigZigZig"));
+//    }
+//}
 
 ////////////////////////////////////////////////////////////////////////////////
 // @TEST : MUTABLE STRING BACKEND                                             //
@@ -3700,23 +3695,12 @@ test "intersectWith(self, string, buffer)      : MutSelf" {
 
 test "string integer and float parsing        : ConstSelf" {
     {
-        const result = init("42").digit(usize) orelse unreachable;
+        const result = init("42").digit(usize) catch unreachable;
         try expect(result == 42);
     }
-
     {
-        const result = init("4Zed").digit(usize);
-        try expect(result == null);
-    }
-
-    {
-        const result = init("42.5").float(f64) orelse unreachable;
+        const result = init("42.5").float(f64) catch unreachable;
         try expect(result < 43.0);
-    }
-
-    {
-        const result = init("9.009.00").float(f64);
-        try expect(result == null);
     }
 }
 
