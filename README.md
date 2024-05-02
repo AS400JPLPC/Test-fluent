@@ -12,3 +12,14 @@ Otherwise, the project remains promising.
 
 
 I forgot, in the source, you have functions using "pcre2posix.h" and functions that I tried to mimic for the same outcome.
+
+
+
+manjro pacman -S pcre2 version 10-42-2
+
+https://www.pcre.org/
+
+https://github.com/PCRE2Project/pcre2
+
+he pcre lib is deprecated
+the pcre2 lib is valid and as indicated in the isMatch source, you must put the extended function
