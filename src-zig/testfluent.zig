@@ -7,8 +7,10 @@ const freg = @import("fluent");
 
 const allocatorPrint = std.heap.page_allocator;
 
-fn isMatch(vbuf : [] const u8 ,  comptime vmatch : [] const u8) bool {
-    
+fn isMatch(vbuf : [] const u8 , comptime  vmatch : [] const u8) bool {
+
+      
+     
     var rep = freg.match(vmatch,vbuf) ;
 
     while (rep.next()) |value| {
@@ -21,11 +23,43 @@ fn isMatch(vbuf : [] const u8 ,  comptime vmatch : [] const u8) bool {
     return false;
 }
 
+pub const FREGEX = struct {
+    width:	usize,
+	scal:	usize,
+	ncar:   usize,
+    regex:  []const u8,	//contrôle regex 
+};
 
+
+fn testx( comptime w: usize ,  comptime s :usize,vbuf : [] const u8) void {
+    comptime var f : FREGEX = undefined;
+    f.width = w;
+    f.scal = s;
+    
+    f.ncar  = w + s ;
+    
+    f.regex = std.fmt.comptimePrint("^[A-Z]{{1}}[a-zA-Z0-9]{s}1,{d}{s}", .{"{", f.ncar,"}" });
+      
+    std.debug.print("fluent:{s} \r\n",.{f.regex});
+    std.debug.print("fluent:{s} {} \r\n",.{vbuf,isMatch(vbuf,f.regex  )});
+
+}
+
+ 
 pub fn main() !void {
 
+// ====================================================================================================
+    // not parametrable model ex import json or fonction 
+    // This implies: that the parameters are fixed values known before compilation  (ex : 5 and 1)
+    testx(5,1,"Pabcex");
 
-
+    // const xreg = std.fmt.allocPrint(allocatorPrint,"{s}",.{"^[A-Z]{1}[a-zA-Z0-9]+"}) catch unreachable;
+    // error
+    // const ztest = std.fmt.comptimePrint("{s}", .{xreg});
+    
+    const ztest = std.fmt.comptimePrint("{s}", .{"^[A-Z]{1}[a-zA-Z0-9]+"});
+    std.debug.print("fluent:{s} {} \r\n",.{"Pabcex12345azertyuiop",isMatch("Pabcex12345azertyuiop",ztest)});
+// ====================================================================================================
 
     std.debug.print("-----------------------\r\n",.{});
     var buf  : [] const u8 = "P1";
@@ -67,11 +101,14 @@ pub fn main() !void {
         isMatch(buf,"[A-Z]{1}[a-zA-Z0-9]{1,5}")
         });
 
-    // not accept var     
-    // const allocRegex = std.heap.page_allocator;
-    // const xx = std.fmt.allocPrint(allocRegex,"[A-Z]{1}[a-zA-Z0-9]{{1,{d}}}",.{buf.len}) catch unreachable;
-    // std.debug.print("fluent:{} \r\n",.{isMatch(buf,xx)});
+    // not accept var 
+    const widthx = 3;
+    const scalx  = 2;
     
+    const number: usize = widthx + scalx;
+    const string: []const u8 = std.fmt.comptimePrint("[A-Z]{1}[a-zA-Z0-9]{s}1,{d}{s}", .{"{", number,"}" });
+    std.debug.print("fluent:{} \r\n",.{isMatch(buf, string)});
+     
     std.debug.print("-----------------------\r\n",.{});
     buf =undefined;
     buf = "P1@";
@@ -119,13 +156,13 @@ pub fn main() !void {
          
     //oreilly editor book
     buf =undefined;
-    buf = "myname.myfirstname@gmail.com";
+    buf = "jpl-myname.myfirstname@gmail.com";
     std.debug.print("Macth {s} mail: {} \r\n",.{buf,creg.isMatch(
     buf,
-    "^[a-zA-Z0-9_!#$%&'*+/=?`{|}~^.-]+@[a-zA-Z0-9.-]+$")});
+    "^[a-zA-Z0-9_!#$%&'*+/=?`{|}~^.-]+@([a-zA-Z0-9.-])+$")});
 
     std.debug.print("fluent {s} mail :{} \r\n",.{buf,
-         isMatch(buf,"[a-zA-Z0-9_!#$%&.-]+@[a-zA-Z0-9.-]+")
+         isMatch(buf,"[a-zA-Z0-9_!#$%&.-]+@([a-zA-Z0-9.-])+")
     });
 
 
@@ -144,22 +181,10 @@ pub fn main() !void {
          isMatch(buf,"^[0-9]{1,5}[.][0-9]{2}$")
     });
 
-
-
-  // norme rFC 2822 preceding   5322  which includes text in front,
-    buf =undefined;
-    buf = "jpl_myname.myfirstname@gmail.com";
- 
-      std.debug.print("Macth Mail:{s}   {} \r\n",.{buf,creg.isMatch(
-      buf,
-      "^[a-zA-Z0-9!#$%&'*+\\/=?^_`{|}~-]+(?:\\.[a-zA-Z0-9!#$%&'*+\\/=?^_`{|}~-]+)*@(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?\\.)+[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?$")});
-       
-
-// var itr2 = freg.match("^[a-zA-Z0-9!#$%&'*+\\/=?^_`{|}~-]+(?:\\.[a-zA-Z0-9!#$%&'*+\\/=?^_`{|}~-]+)*@(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?\\.)+[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?$",buf);
-//                 while (itr2.next()) |str|{
-//             std.debug.print("SHOULD NOT SEE THIS |{s}|\n", .{ str });}
-
-
-          
+    const xtestnum = std.fmt.comptimePrint( "^[0-9]{s}1,{d}{s}[.][0-9]{s}{d}{s}$",.{"{",width,"}","{",scal,"}"});
+      
+    std.debug.print("fluent:{s} \r\n",.{ xtestnum});
+    std.debug.print("fluent:{s} {} \r\n",.{buf,isMatch(buf, xtestnum  )});
+         
 }
 
