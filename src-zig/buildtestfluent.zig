@@ -17,19 +17,19 @@ pub fn build(b: *std.Build) void {
     // Definition of dependencies
 
     const match = b.createModule(.{
-      .root_source_file= .{ .path = "./deps/match.zig"},
+      .root_source_file= b.path("./deps/curse/match.zig"),
     });
-	match.addIncludePath(.{.path = "./lib/"});
+	match.addIncludePath( b.path("./lib/"));
 
 
     const fluent = b.createModule(.{
-      .root_source_file= .{ .path = "./deps/fluent.zig"},
+      .root_source_file= b.path("./deps/curse/fluent.zig"),
     });
 	
     // Building the executable
     const Prog = b.addExecutable(.{
     .name = "testfluent",
-    .root_source_file = .{ .path = "./testfluent.zig" },
+    .root_source_file = b.path("./testfluent.zig"),
     .target = target,
     .optimize = optimize,
     });

@@ -49,6 +49,7 @@ fn FluentInterface(comptime T: type) type {
 // Public Fluent Iterator Access Point                                      ////
 ////////////////////////////////////////////////////////////////////////////////
 
+/// enum {forward, reverse}
 pub const IteratorMode = enum { forward, reverse };
 
 pub fn BaseIterator(comptime T: type, mode: IteratorMode) type {
@@ -67,15 +68,11 @@ pub fn iterator(
 
     const P = [*c]const T;
 
-    const ptr: [*c]const T = if (comptime mode == .forward)
-        @as(P, @ptrCast(items.ptr))
-    else
-        (@as(P, @ptrCast(items.ptr)) + items.len) - 1;
+    const ptr: P = if (comptime mode == .forward)
+        @as(P, @ptrCast(items.ptr)) else (@as(P, @ptrCast(items.ptr)) + items.len) - 1;
 
-    const end: [*c]const T = if (comptime mode == .forward)
-        @as(P, @ptrCast(items.ptr)) + items.len
-    else
-        @as(P, @ptrCast(items.ptr)) - 1;
+    const end: P = if (comptime mode == .forward)
+        @as(P, @ptrCast(items.ptr)) + items.len else @as(P, @ptrCast(items.ptr)) - 1;
 
     return .{
         .ptr = ptr,
@@ -97,11 +94,16 @@ pub fn MatchIterator(
             return .{ .items = items, .index = 0 };
         }
 
-        pub fn next(self: *Self) ?[]const u8 {
+        pub fn next(self: *Self) ?FluentInterface([]const u8) {
             while (self.index < self.items.len) : (self.index += 1) {
                 if (tree.call(self.items, self.index, false)) |last| {
+
+                    // non-advancing calls
+                    if (self.index == last) 
+                        continue;
+
                     defer self.index = last;
-                    return self.items[self.index..last];
+                    return Fluent.init(self.items[self.index..last]);
                 }
             }
             return null;
@@ -109,6 +111,7 @@ pub fn MatchIterator(
     };
 }
 
+/// match - match substrings based on an expression
 pub fn match(
     comptime expression: []const u8,
     source: []const u8,
@@ -127,20 +130,29 @@ fn SplitIterator(comptime expression: []const u8) type {
             return .{ .items = items, .index = 0 };
         }
 
-        pub fn next(self: *Self) ?[]const u8 {
+        pub fn next(self: *Self) ?FluentInterface([]const u8) {
             const start = self.index orelse return null;
             var stop: usize = start;
             const end: ?usize = blk: {
                 while (stop < self.items.len) : (stop += 1) {
-                    if (tree.call(self.items, stop, false)) |n| break :blk n else continue;
+
+                    const last = tree.call(self.items, stop, false) orelse continue;
+
+                    // non-advancing calls
+                    if (start == last)
+                        continue;
+
+                    break :blk last;
+                    
                 } else break :blk null;
             };
             defer self.index = end;
-            return self.items[start..stop];
+            return Fluent.init(self.items[start..stop]);
         }
     };
 }
 
+/// split - splits a string based on a delimiting expression
 pub fn split(
     comptime expression: []const u8,
     source: []const u8,
@@ -155,7 +167,7 @@ pub fn split(
 //////////////////////////////////////////////////////////////////////
 // chain: combine multiple unary functions into a single in-order call
 
-pub fn chain(
+pub fn Chain(
     comptime unary_tuple: anytype,
 ) type {
     return struct {
@@ -187,7 +199,7 @@ else
 pub fn bind(
     comptime bind_tuple: anytype,
     comptime function: anytype,
-) bindReturn(bind_tuple, function) {
+) BindRetun(bind_tuple, function) {
     const bind_count = comptime tupleSize(bind_tuple);
     const total_count = comptime @typeInfo(@TypeOf(function)).Fn.params.len;
 
@@ -206,7 +218,7 @@ pub fn bind(
     }
 }
 
-fn bindReturn(
+fn BindRetun(
     comptime bind_tuple: anytype,
     comptime function: anytype,
 ) type {
@@ -293,7 +305,7 @@ fn IteratorInterface(
             const transform = comptime if (@typeInfo(@TypeOf(transforms)) == .Fn)
                 transforms
             else
-                Fluent.chain(transforms).call;
+                Fluent.Chain(transforms).call;
 
             switch (comptime Mode) {
                 .forward => {
@@ -312,6 +324,7 @@ fn IteratorInterface(
             return null;
         }
 
+        /// strided - set iterator stride (default 1)
         pub fn strided(
             self: Self,
             stride_size: usize,
@@ -323,27 +336,29 @@ fn IteratorInterface(
             };
         }
 
+        /// window - return a slice and advance by stride
         pub fn window(
             self: *Self,
             window_size: usize,
-        ) ?[]const DataType {
+        ) ?FluentInterface([]const DataType) {
             switch (comptime Mode) {
                 .forward => {
                     if (self.ptr + window_size <= self.end) {
                         defer _ = self.next();
-                        return self.ptr[0..window_size];
+                        return Fluent.init(self.ptr[0..window_size]);
                     }
                 },
                 .reverse => {
                     if ((self.ptr + 1) - window_size > self.end) {
                         defer _ = self.next();
-                        return ((self.ptr + 1) - window_size)[0..window_size];
+                        return Fluent.init(((self.ptr + 1) - window_size)[0..window_size]);
                     }
                 },
             }
             return null;
         }
 
+        /// map - transforms every elment in the acquired slice with a given unary function
         pub fn map(
             self: Self,
             comptime new_transforms: anytype,
@@ -355,6 +370,7 @@ fn IteratorInterface(
             };
         }
 
+        /// filter - acquire a unary predicate or a tuple of unary predicates
         pub fn filter(
             self: Self,
             comptime new_filters: anytype,
@@ -407,22 +423,26 @@ fn IteratorInterface(
 
 pub fn GeneralImmutableBackend(comptime Self: type) type {
     return struct {
+        /// all - check if all elements of the acquired slice are true by given predicate
         pub fn all(self: Self, predicate: fn (Self.DataType) bool) bool {
             return for (self.items) |x| {
                 if (!predicate(x)) break false;
             } else true;
         }
 
+        /// none - check if no elements of the acquired slice are true by given predicate
         pub fn none(self: Self, predicate: fn (Self.DataType) bool) bool {
             return for (self.items) |x| {
                 if (predicate(x)) break false;
             } else true;
         }
 
+        /// getAt - returns an element for given positive or negative index
         pub fn getAt(self: Self, idx: anytype) Self.DataType {
             return self.items[wrapIndex(self.items.len, idx)];
         }
 
+        /// slice - chainable slicing operation for acquired slice
         pub fn slice(self: Self, i: anytype, j: anytype) Self {
             const I = @TypeOf(i);
             const J = @TypeOf(j);
@@ -453,27 +473,37 @@ pub fn GeneralImmutableBackend(comptime Self: type) type {
         //  obvious that we're support any kind of slice and
         //  both Mutable and Immutable backends.
 
+        ///order - returns the lexicographical order compared to a given slice
         pub fn order(self: Self, items: []const Self.DataType) Order {
             return std.mem.order(Self.DataType, self.items, items);
         }
+
+        /// equal - returns true if lexicogrpahical order is equal to a given slice
         pub fn equal(self: Self, items: []const Self.DataType) bool {
             return order(self, items) == .eq;
         }
 
+        /// sum - returns the sum of all elements or zero if slice is empty
         pub fn sum(self: Self) Self.DataType {
             return @call(.always_inline, simdReduce, .{ Self.DataType, ReduceOp.Add, add, self.items, reduceInit(ReduceOp.Add, Self.DataType) });
         }
+
+        /// product - returns the product of all elements or zero if slice is empty
         pub fn product(self: Self) Self.DataType {
             return @call(.always_inline, simdReduce, .{ Self.DataType, ReduceOp.Mul, mul, self.items, reduceInit(ReduceOp.Mul, Self.DataType) });
         }
 
+        /// min - returns an optional minimum value from the acquired slice
         pub fn min(self: Self) ?Self.DataType {
             return if (self.items.len == 0) null else @call(.always_inline, simdReduce, .{ Self.DataType, ReduceOp.Min, Fluent.min, self.items, reduceInit(ReduceOp.Min, Self.DataType) });
         }
+
+        /// max - returns an optional maximum value from the acquired slice
         pub fn max(self: Self) ?Self.DataType {
             return if (self.items.len == 0) null else @call(.always_inline, simdReduce, .{ Self.DataType, ReduceOp.Max, Fluent.max, self.items, reduceInit(ReduceOp.Max, Self.DataType) });
         }
 
+        /// write - writes the acquired slice to a given buffer
         pub fn write(self: Self, out_buffer: []Self.DataType) Self {
             if (self.items.len == 0) return self;
             std.debug.assert(self.items.len < out_buffer.len);
@@ -481,17 +511,28 @@ pub fn GeneralImmutableBackend(comptime Self: type) type {
             return (self);
         }
 
-        pub fn print(self: Self, comptime format: []const u8) Self {
+        
+        /// print - prints the acquired slice based on a given format string
+        pub fn print(self: Self, comptime print_format: []const u8) Self {
             // this is intended to work similarly to std.log.info
-            const stderr = std.io.getStdErr();
-            defer stderr.close();
-            const writer = stderr.writer();
-            std.debug.getStderrMutex().lock();
-            defer std.debug.getStderrMutex().unlock();
-            writer.print(format, .{self.items}) catch {};
+            std.debug.lockStdErr();
+            defer std.debug.unlockStdErr();
+            const writer = std.io.getStdErr().writer();
+            writer.print(print_format, .{self.items}) catch {};
             return self;
+        }    
+    
+        pub fn format(
+            self: Self,
+            comptime _: []const u8,
+            _: std.fmt.FormatOptions,
+            writer: anytype,
+        ) !void {
+            const fmt: []const u8 = if (Self.DataType == u8) "{s}" else "{any}";
+            _ = try writer.print(fmt ++ "\n", .{ self.items });
         }
 
+        /// sample - randomly samples a range from the acquired slice given a size
         pub fn sample(self: Self, random: std.Random, size: usize) []const Self.DataType {
             std.debug.assert(size <= self.items.len);
 
@@ -503,6 +544,7 @@ pub fn GeneralImmutableBackend(comptime Self: type) type {
             return self.items[start..][0..size];
         }
 
+        /// reduce - returns a reduction based on an intial value and binary function
         pub fn reduce(
             self: Self,
             comptime reduce_type: type,
@@ -516,6 +558,7 @@ pub fn GeneralImmutableBackend(comptime Self: type) type {
             return rdx;
         }
 
+        /// mapReduce - applies unary function and reduces on intial value and binary function
         pub fn mapReduce(
             self: Self,
             comptime reduce_type: type,
@@ -526,7 +569,7 @@ pub fn GeneralImmutableBackend(comptime Self: type) type {
             const unary_call = comptime if (@typeInfo(@TypeOf(unary_func)) == .Fn)
                 unary_func
             else
-                chain(unary_func).call;
+                Chain(unary_func).call;
 
             var rdx = initial;
             for (self.items) |x| {
@@ -536,6 +579,7 @@ pub fn GeneralImmutableBackend(comptime Self: type) type {
             return rdx;
         }
 
+        /// concat - appends the aquired slice to a given slice into a given buffer
         pub fn concat(
             self: Self,
             items: []const Self.DataType,
@@ -548,6 +592,7 @@ pub fn GeneralImmutableBackend(comptime Self: type) type {
             return .{ .items = concat_buffer[0..concat_index] };
         }
 
+        /// join - appends the aquired slice to a given range of slices into a given buffer
         pub fn join(
             self: Self,
             collection: []const []const Self.DataType,
@@ -584,6 +629,7 @@ fn ImmutableNumericBackend(comptime Self: type) type {
         //  PUBLIC SECTION   //
         ///////////////////////
 
+        /// findFrom - returns first index after a given position of scalar, slice, or any
         pub fn findFrom(
             self: Self,
             comptime mode: FluentMode,
@@ -597,6 +643,7 @@ fn ImmutableNumericBackend(comptime Self: type) type {
             };
         }
 
+        /// containsFrom - check if contains a given scalar, sequence, or any after a given index
         pub fn containsFrom(
             self: Self,
             comptime mode: FluentMode,
@@ -606,6 +653,7 @@ fn ImmutableNumericBackend(comptime Self: type) type {
             return findFrom(self, mode, start_index, needle) != null;
         }
 
+        /// find - returns first index of scalar, slice, or any
         pub fn find(
             self: Self,
             comptime mode: FluentMode,
@@ -614,6 +662,7 @@ fn ImmutableNumericBackend(comptime Self: type) type {
             return findFrom(self, mode, 0, needle);
         }
 
+        /// contains - check if contains a given scalar, sequence, or any
         pub fn contains(
             self: Self,
             comptime mode: FluentMode,
@@ -622,6 +671,7 @@ fn ImmutableNumericBackend(comptime Self: type) type {
             return find(self, mode, needle) != null;
         }
 
+        /// startsWith - checks if the acquired slice starts with a scalar, sequence, or any
         pub fn startsWith(
             self: Self,
             comptime mode: FluentMode,
@@ -641,6 +691,7 @@ fn ImmutableNumericBackend(comptime Self: type) type {
             };
         }
 
+        /// endsWith - checks if the acquired slice ends with a scalar, sequence, or any
         pub fn endsWith(
             self: Self,
             comptime mode: FluentMode,
@@ -660,32 +711,38 @@ fn ImmutableNumericBackend(comptime Self: type) type {
             };
         }
 
-        /// supported opt = {all, leading, trailing, until, periphery, inside, inverse}
-        pub fn count(self: Self, opt: CountOption, comptime mode: FluentMode, needle: Parameter(Self.DataType, mode)) usize {
+        /// count - counts all, left, right given a scalar, sequence, or any
+        pub fn count(
+            self: Self, 
+            direction: DirectionOption, 
+            comptime mode: FluentMode,
+            needle: Parameter(Self.DataType, mode),
+        ) usize {
             if (self.items.len == 0) return 0;
 
-            return switch (opt) {
+            return switch (direction) {
                 .all => countAll(self, mode, needle),
-                .leading => countLeading(self, mode, needle),
-                .trailing => countTrailing(self, mode, needle),
-                .periphery => countLeading(self, mode, needle) + countTrailing(self, mode, needle),
-                .until => countUntil(self, mode, needle),
-                .inside => countAll(self, mode, needle) - (countLeading(self, mode, needle) + countTrailing(self, mode, needle)),
-                .inverse => self.items.len - countAll(self, mode, needle),
+                .left => countLeft(self, mode, needle),
+                .right => countRight(self, mode, needle),
             };
         }
 
+
+        /// trim - trims left, right, or all based on any, sequence, or scalar
         pub fn trim(
             self: Self,
             comptime direction: DirectionOption,
-            comptime opt: TrimOptions,
-            actor: Parameter(Self.DataType, opt),
+            comptime option: TrimOptions,
+            comptime needle: Parameter(Self.DataType, option),
         ) Self {
-            if (self.items.len <= 1) return self;
-            const start: usize = if (direction == .left or direction == .periphery) trimLeft(self, opt, actor) else 0;
-            const end: usize = if (direction == .right or direction == .periphery) trimRight(self, opt, actor) else self.items.len;
-            return .{ .items = self.items[start..end] };
+            if (self.items.len == 0) return self;
+            return switch (direction) {
+                .left  => .{ .items = self.items[trimLeft(self, option, needle)..] },
+                .right => .{ .items = self.items[0..trimRight(self, option, needle)] },
+                .all => self.trim(.left, option, needle).trim(.right, option, needle),
+            };
         }
+
 
         ///////////////////////////////////////////////////
         // Iterator support ///////////////////////////////
@@ -698,20 +755,15 @@ fn ImmutableNumericBackend(comptime Self: type) type {
             return .{ .index = 0, .buffer = self.items, .delimiter = delimiter };
         }
 
-        pub fn tokenize(
-            self: Self,
-            comptime mode: std.mem.DelimiterType,
-            delimiter: Parameter(Self.DataType, mode),
-        ) std.mem.TokenIterator(Self.DataType, mode) {
-            return .{ .index = 0, .buffer = self.items, .delimiter = delimiter };
-        }
-
         ///////////////////////
         //  PRIVATE SECTION  //
         ///////////////////////
 
-        fn trimLeft(self: Self, comptime opt: TrimOptions, actor: Parameter(Self.DataType, opt)) usize {
-            if (self.items.len <= 1) return 0;
+        fn trimLeft(
+            self: Self,
+            comptime opt: TrimOptions,
+            actor: Parameter(Self.DataType, opt),
+        ) usize {
             var start: usize = 0;
             const end: usize = self.items.len;
             switch (opt) {
@@ -728,8 +780,11 @@ fn ImmutableNumericBackend(comptime Self: type) type {
             return start;
         }
 
-        fn trimRight(self: Self, comptime opt: TrimOptions, actor: Parameter(Self.DataType, opt)) usize {
-            if (self.items.len <= 1) return 0;
+        fn trimRight(
+            self: Self,
+            comptime opt: TrimOptions,
+            actor: Parameter(Self.DataType, opt),
+        ) usize {
             const start: usize = 0;
             var end: usize = self.items.len;
             switch (opt) {
@@ -746,29 +801,32 @@ fn ImmutableNumericBackend(comptime Self: type) type {
             return end;
         }
 
-        /// count the occurence of needles in self.items returns 0 if no match is found
-        fn countAll(self: Self, comptime mode: FluentMode, needle: Parameter(Self.DataType, mode)) usize {
+        fn countAll(
+            self: Self,
+            comptime mode: FluentMode,
+            needle: Parameter(Self.DataType, mode),
+        ) usize {
             var result: usize = 0;
 
             switch (mode) {
                 .scalar => {
-                    for (self.items) |it| {
-                        if (it == needle) result += 1;
-                    }
+                    for (self.items) |it| { if (it == needle) result += 1; }
                 },
                 .sequence => result = std.mem.count(Self.DataType, self.items, needle),
                 .any => {
                     for (self.items) |it| {
-                        for (needle) |n| {
-                            if (it == n) result += 1;
-                        }
+                        for (needle) |n| { if (it == n) result += 1; }
                     }
                 },
             }
             return (result);
         }
 
-        fn countLeading(self: Self, comptime mode: FluentMode, needle: Parameter(Self.DataType, mode)) usize {
+        fn countLeft(
+            self: Self,
+            comptime mode: FluentMode,
+            needle: Parameter(Self.DataType, mode),
+        ) usize {
             var result: usize = 0;
             switch (mode) {
                 .scalar => {
@@ -792,37 +850,16 @@ fn ImmutableNumericBackend(comptime Self: type) type {
             return (result);
         }
 
-        fn countUntil(self: Self, comptime mode: FluentMode, needle: Parameter(Self.DataType, mode)) usize {
+        fn countRight(
+            self: Self,
+            comptime mode: FluentMode,
+            needle: Parameter(Self.DataType, mode),
+        ) usize {
             var result: usize = 0;
             switch (mode) {
                 .scalar => {
-                    for (self.items, 0..) |it, i| {
-                        if (it == needle) return (i);
-                    }
-                },
-                .sequence => {
-                    if (self.items.len < needle.len) return (0);
-                    var win_iter = std.mem.window(Self.DataType, self.items, needle.len, needle.len);
-                    while (win_iter.next()) |win| : (result += 1) {
-                        if (std.mem.eql(Self.DataType, win, needle) == true) break;
-                    }
-                },
-                .any => {
-                    for (self.items) |it| {
-                        if (std.mem.containsAtLeast(Self.DataType, needle, 1, &[_]Self.DataType{it}) == true) break;
-                        result += 1;
-                    }
-                },
-            }
-            return (result);
-        }
-
-        fn countTrailing(self: Self, comptime mode: FluentMode, needle: Parameter(Self.DataType, mode)) usize {
-            var result: usize = 0;
-            var rev_iter = std.mem.reverseIterator(self.items);
-            switch (mode) {
-                .scalar => {
-                    while (rev_iter.next()) |item| : (result += 1) {
+                    var itr = Fluent.iterator(.reverse, self.items);
+                    while (itr.next()) |item| : (result += 1) {
                         if (item != needle) break;
                     }
                 },
@@ -831,17 +868,18 @@ fn ImmutableNumericBackend(comptime Self: type) type {
                     var start = self.items.len - needle.len;
                     while (start != 0) : (start -|= needle.len) {
                         const win = self.items[start .. start + needle.len];
-                        if (std.mem.eql(Self.DataType, win, needle) == false) break;
+                        if (!std.mem.eql(Self.DataType, win, needle)) break;
                         result += 1;
                     }
                 },
                 .any => {
-                    while (rev_iter.next()) |item| : (result += 1) {
-                        if (std.mem.containsAtLeast(Self.DataType, needle, 1, &[_]Self.DataType{item}) == false) break;
+                    var itr = Fluent.iterator(.reverse, self.items);
+                    while (itr.next()) |item| : (result += 1) {
+                        if (!std.mem.containsAtLeast(Self.DataType, needle, 1, &[_]Self.DataType{item})) break;
                     }
                 },
             }
-            return (result);
+            return result;
         }
     };
 }
@@ -858,10 +896,11 @@ pub fn GeneralMutableBackend(comptime Self: type) type {
     return struct {
 
         // includes operations like reduce, find, and iterators
-        pub usingnamespace ImmutableNumericBackend(Self);
+        pub usingnamespace GeneralImmutableBackend(Self);
 
+        /// sort - sorts the range in ascending or descending order
         pub fn sort(self: Self, comptime direction: SortDirection) Self {
-            const func = if (direction == .ascending)
+            const func = if (direction == .asc)
                 std.sort.asc(Self.DataType)
             else
                 std.sort.desc(Self.DataType);
@@ -870,17 +909,20 @@ pub fn GeneralMutableBackend(comptime Self: type) type {
             return self;
         }
 
+        /// fill - fills the acquired slice with a scalar value
         pub fn fill(self: Self, scalar: Self.DataType) Self {
             @memset(self.items, scalar);
             return self;
         }
 
+        /// copy - copy a given slice into the acquired slice
         pub fn copy(self: Self, items: []const Self.DataType) Self {
             std.debug.assert(self.items.len >= items.len);
             @memcpy(self.items[0..items.len], items);
             return .{ .items = self.items[0..items.len] };
         }
 
+        /// rotate - rotates the array by both negative and positive amounts
         pub fn rotate(self: Self, amount: anytype) Self {
             const len = self.items.len;
 
@@ -897,27 +939,31 @@ pub fn GeneralMutableBackend(comptime Self: type) type {
             return self;
         }
 
+        /// reverse - reverses the acquired slice
         pub fn reverse(self: Self) Self {
             std.mem.reverse(Self.DataType, self.items);
             return (self);
         }
 
+        /// setAt - sets a given position with a provided value using index wrapping
         pub fn setAt(self: Self, idx: anytype, item: Self.DataType) Self {
             self.items[wrapIndex(self.items.len, idx)] = item;
             return self;
         }
 
+        /// map - transforms every elment in the acquired slice with a given unary function
         pub fn map(self: Self, unary_func: anytype) Self {
             const unary_call = comptime if (@typeInfo(@TypeOf(unary_func)) == .Fn)
                 unary_func
             else
-                chain(unary_func).call;
+                Chain(unary_func).call;
 
             for (self.items) |*x| x.* = @call(.always_inline, unary_call, .{x.*});
             return self;
         }
 
-        fn shuffle(self: Self, random: std.Random) Self {
+        /// shuffle - randomly shuffles the acquired slice
+        pub fn shuffle(self: Self, random: std.Random) Self {
             random.shuffle(Self.DataType, self.items);
             return self;
         }
@@ -927,164 +973,9 @@ pub fn GeneralMutableBackend(comptime Self: type) type {
 fn MutableNumericBackend(comptime Self: type) type {
     return struct {
 
-        ///////////////////////
-        //  PUBLIC SECTION   //
-        ///////////////////////
+        pub usingnamespace ImmutableNumericBackend(Self);
 
         pub usingnamespace GeneralMutableBackend(Self);
-
-        pub fn replace(
-            self: Self,
-            opt: ReplaceOption,
-            comptime mode: FluentMode,
-            this: Parameter(Self.DataType, mode),
-            with: Parameter(Self.DataType, mode),
-        ) Self {
-            if (self.items.len == 0) return self;
-
-            if (opt == .all) return replaceAll(self, mode, this, with);
-
-            if (opt == .first or opt == .periphery)
-                _ = replaceFirst(self, mode, this, with);
-
-            if (opt == .last or opt == .periphery)
-                _ = replaceLast(self, mode, this, with);
-
-            return .{ .items = self.items[0..] };
-        }
-
-        ///////////////////////
-        //  PRIVATE SECTION  //
-        ///////////////////////
-
-        fn replaceRange(
-            self: Self,
-            start: usize,
-            end: usize,
-            comptime mode: FluentMode,
-            with: Parameter(Self.DataType, mode),
-        ) Self {
-            return switch (mode) {
-                .scalar => self.setAt(start, with),
-                .sequence, .any => blk: {
-                    @memcpy(self.items[start..end], with);
-                    break :blk .{ .items = self.items[0..] };
-                },
-            };
-        }
-
-        fn replaceFirst(
-            self: Self,
-            comptime mode: FluentMode,
-            this: Parameter(Self.DataType, mode),
-            with: Parameter(Self.DataType, mode),
-        ) Self {
-            switch (mode) {
-                .scalar => for (self.items) |*item| {
-                    if (item.* != this) continue;
-                    item.* = with;
-                    return (self);
-                },
-                .sequence => {
-                    std.debug.assert(this.len == with.len);
-                    var win_iter = self.iterator(.forward);
-                    var offset: usize = 0;
-                    while (win_iter.window(this.len)) |win| : (offset += 1) {
-                        if (!std.mem.eql(Self.DataType, win, this))
-                            continue;
-                        return replaceRange(self, offset, offset + with.len, mode, with);
-                    }
-                },
-                .any => {
-                    std.debug.assert(this.len == with.len);
-                    var index: usize = 0;
-                    while (index < self.items.len) : (index += 1) {
-                        if (std.mem.containsAtLeast(Self.DataType, this, 1, &[_]Self.DataType{self.items[index]})) {
-                            for (this, 0..) |ch, at| {
-                                if (ch == self.items[index])
-                                    return (self.setAt(index, with[at]));
-                            }
-                        }
-                    }
-                },
-            }
-            return self;
-        }
-
-        fn replaceLast(
-            self: Self,
-            comptime mode: FluentMode,
-            this: Parameter(Self.DataType, mode),
-            with: Parameter(Self.DataType, mode),
-        ) Self {
-            switch (mode) {
-                .scalar => {
-                    var rev_iter = std.mem.reverseIterator(self.items);
-                    var index: usize = self.items.len - 1;
-                    while (rev_iter.next()) |item| : (index -= 1) {
-                        if (item != this)
-                            continue;
-                        return self.setAt(index, with);
-                    }
-                },
-                .sequence => {
-                    std.debug.assert(this.len == with.len);
-                    var start = self.items.len - this.len;
-                    while (start != 0) : (start -|= 1) {
-                        const win = self.items[start .. start + this.len];
-                        if (std.mem.eql(Self.DataType, win, this) == false)
-                            continue;
-                        return replaceRange(self, start, start + with.len, mode, with);
-                    }
-                },
-                .any => {
-                    var index: usize = self.items.len - 1;
-                    var rev_iter = std.mem.reverseIterator(self.items);
-                    while (rev_iter.next()) |item| : (index -= 1) {
-                        if (std.mem.containsAtLeast(Self.DataType, this, 1, &[_]Self.DataType{item})) {
-                            for (this, 0..) |ch, at| {
-                                if (ch == self.items[index])
-                                    return (self.setAt(index, with[at]));
-                            }
-                        }
-                    }
-                },
-            }
-            return self;
-        }
-
-        fn replaceAll(
-            self: Self,
-            comptime mode: FluentMode,
-            this: Parameter(Self.DataType, mode),
-            with: Parameter(Self.DataType, mode),
-        ) Self {
-            switch (mode) {
-                .scalar => std.mem.replaceScalar(Self.DataType, self.items, this, with),
-                .sequence => {
-                    std.debug.assert(this.len == with.len);
-                    var win_iter = self.iterator(.forward);
-                    var offset: usize = 0;
-                    while (win_iter.window(this.len)) |win| : (offset += 1) {
-                        if (std.mem.eql(Self.DataType, win, this))
-                            _ = replaceRange(self, offset, offset + with.len, mode, with);
-                    }
-                },
-                .any => {
-                    std.debug.assert(this.len == with.len);
-                    var index: usize = 0;
-                    while (index < self.items.len) : (index += 1) {
-                        if (std.mem.containsAtLeast(Self.DataType, this, 1, &[_]Self.DataType{self.items[index]})) {
-                            for (this, 0..) |ch, at| {
-                                if (ch == self.items[index])
-                                    _ = self.setAt(index, with[at]);
-                            }
-                        }
-                    }
-                },
-            }
-            return self;
-        }
     };
 }
 
@@ -1098,48 +989,59 @@ const StringMode = enum { regex, scalar };
 
 fn ImmutableStringBackend(comptime Self: type) type {
     return struct {
+
         pub usingnamespace GeneralImmutableBackend(Self);
 
         ///////////////////////
         //  PUBLIC SECTION   //
         ///////////////////////
 
+        /// isDigit - returns true for [0-9]+
         pub fn isDigit(self: Self) bool {
             return self.all(std.ascii.isDigit);
         }
 
+        /// isAlpha - returns true for [a-zA-z]+
         pub fn isAlpha(self: Self) bool {
             return self.all(std.ascii.isAlphabetic);
         }
 
+        /// isSpaces - returns true for [\s]+
         pub fn isSpaces(self: Self) bool {
             return self.all(std.ascii.isWhitespace);
         }
 
+        /// isLower - returns true for lowercase letters
         pub fn isLower(self: Self) bool {
             return self.all(std.ascii.isLower);
         }
 
+        /// isUpper - returns true for uppercase letters
         pub fn isUpper(self: Self) bool {
             return self.all(std.ascii.isUpper);
         }
 
+        /// isHex - returns true for hexadecimal characters [0-9a-fA-F]
         pub fn isHex(self: Self) bool {
             return self.all(std.ascii.isHex);
         }
 
+        /// isASCII - returns true for ASCII characters
         pub fn isASCII(self: Self) bool {
             return self.all(std.ascii.isASCII);
         }
 
+        /// isPrintable - returns true for printable ASCII characters
         pub fn isPrintable(self: Self) bool {
             return self.all(std.ascii.isPrint);
         }
 
+        /// isAlnum - returns true for alphanumeric characters [a-zA-Z0-9]
         pub fn isAlnum(self: Self) bool {
             return self.all(std.ascii.isAlphanumeric);
         }
 
+        /// digit - parses the string as an integer in base 10
         pub fn digit(self: Self, comptime T: type) !T {
             if (comptime !isInteger(T))
                 @compileError("digit: requires integer type.");
@@ -1147,6 +1049,7 @@ fn ImmutableStringBackend(comptime Self: type) type {
             return std.fmt.parseInt(T, self.items, 10);
         }
 
+        /// float - parses the string as a floating-point number
         pub fn float(self: Self, comptime T: type) !T {
             if (comptime !isFloat(T))
                 @compileError("float: requires floating-point type.");
@@ -1154,77 +1057,129 @@ fn ImmutableStringBackend(comptime Self: type) type {
             return std.fmt.parseFloat(T, self.items);
         }
 
+        /// float - parses the string as a floating-point number
+        pub fn cast(self: Self, comptime T: type) !T {
+            return switch (@typeInfo(T)) {
+                .Int, .ComptimeInt => self.digit(),
+                .Float, .ComptimeFloat => self.float(),
+                else => @compileError("cast: requires floating point or integer types.")
+            };
+        }
+
+        // regex returns a range
+        const RegexFindResult = struct { 
+            pos: usize,
+            end: usize,
+        };
+
+        /// findFrom - returns first index after a given position of scalar, slice, or any
         pub fn findFrom(
             self: Self,
             comptime mode: StringMode,
             start_index: usize,
-            comptime needle: Parameter(Self.DataType, mode),
-        ) ?usize {
+            comptime needle: Parameter(u8, mode),
+        ) switch(mode) {
+            .scalar => ?usize, 
+            .regex => ?RegexFindResult,      
+        } {
             return switch (mode) {
                 .scalar => std.mem.indexOfScalarPos(Self.DataType, self.items, start_index, needle),
                 .regex => blk: {
                     var itr = Fluent.match(needle, self.items[start_index..]);
-                    const items = itr.next() orelse break :blk null;
-                    break :blk (itr.index - items.len) + start_index;
+                    const x = itr.next() orelse break :blk null;
+                    break :blk RegexFindResult {
+                        .pos = (itr.index - x.items.len) + start_index,
+                        .end = itr.index + start_index
+                    };  
                 },
             };
         }
 
+        /// containsFrom - check if contains a given scalar, sequence, or any after a given index
         pub fn containsFrom(
             self: Self,
             comptime mode: StringMode,
             start_index: usize,
-            comptime needle: Parameter(Self.DataType, mode),
+            comptime needle: Parameter(u8, mode),
         ) bool {
             return findFrom(self, mode, start_index, needle) != null;
         }
 
+        /// find - returns first index of scalar, slice, or any
         pub fn find(
             self: Self,
             comptime mode: StringMode,
-            comptime needle: Parameter(Self.DataType, mode),
-        ) ?usize {
+            comptime needle: Parameter(u8, mode),
+        ) switch(mode) {
+            .scalar => ?usize, 
+            .regex => ?RegexFindResult,      
+        } {
             return findFrom(self, mode, 0, needle);
         }
 
+        /// contains - check if contains a given scalar, sequence, or any
         pub fn contains(
             self: Self,
             comptime mode: StringMode,
-            comptime needle: Parameter(Self.DataType, mode),
+            comptime needle: Parameter(u8, mode),
         ) bool {
             return find(self, mode, needle) != null;
         }
 
+        /// trim - trims left, right, or all based on any, sequence, or scalar
         pub fn trim(
             self: Self,
             comptime direction: DirectionOption,
             comptime mode: StringMode,
-            comptime needle: Parameter(Self.DataType, mode),
+            comptime needle: Parameter(u8, mode),
         ) Self {
-            if (self.items.len <= 1) return self;
-            const start: usize = if (direction == .left or direction == .periphery) trimLeft(self, mode, needle) else 0;
-            const end: usize = if (direction == .right or direction == .periphery) trimRight(self, mode, needle) else self.items.len;
-            return .{ .items = self.items[start..end] };
+            if (self.items.len == 0) return self;
+            return switch (direction) {
+                .left  => .{ .items = self.items[trimLeft(self, mode, needle)..] },
+                .right => .{ .items = self.items[0..trimRight(self, mode, needle)] },
+                .all => self.trim(.left, mode, needle).trim(.right, mode, needle),
+            };
+        }
+
+        /// count - counts all, left, right given a scalar, sequence, or any
+        pub fn count(
+            self: Self,
+            comptime direction: DirectionOption,
+            comptime mode: StringMode,
+            comptime needle: Parameter(u8, mode),
+        ) usize {
+            return switch (direction) {
+                .all => countAll(self, mode, needle),
+                .left => countLeft(self, mode, needle),
+                .right => countRight(self, mode, needle),
+            };
         }
 
         ///////////////////////////////////////////////////
         // Iterator support ///////////////////////////////
 
-        pub fn split(self: Self, comptime mode: StringMode, comptime delimiter: Parameter(u8, mode)) switch (mode) {
-            .scalar => std.mem.SplitIterator(u8, .scalar),
-            .regex => Fluent.SplitIterator(delimiter),
-        } {
-            return switch (mode) {
-                .scalar => std.mem.SplitIterator(u8, .scalar){ .buffer = self.items, .index = 0, .delimiter = delimiter },
-                .regex => Fluent.split(delimiter, self.items),
-            };
+        /// split - splits a string based on a delimiting expression
+        pub fn split(
+            self: Self,
+            comptime delimiter: []const u8,
+        ) Fluent.SplitIterator(delimiter) {
+            return Fluent.split(delimiter, self.items);
         }
 
+        /// match - match substrings based on an expression
+        pub fn match(
+            self: Self,
+            comptime delimiter: []const u8,
+        ) Fluent.SplitIterator(delimiter) {
+            return Fluent.match(delimiter, self.items);
+        }
+
+        /// differenceWith - returns set diference between acquired slice and given slice
         pub fn differenceWith(
             self: Self,
             string: []const u8,
             diff_buffer: []u8,
-        ) FluentInterface([]Self.DataType) {
+        ) FluentInterface([]u8) {
             var items_set = StringBitSet.init();
             var string_set = StringBitSet.init();
 
@@ -1238,11 +1193,12 @@ fn ImmutableStringBackend(comptime Self: type) type {
             return .{ .items = items_set.differenceWith(string_set).fillBuffer(diff_buffer) };
         }
 
+        /// unionWith - returns set union between acquired slice and given slice
         pub fn unionWith(
             self: Self,
             string: []const u8,
             union_buffer: []u8,
-        ) FluentInterface([]Self.DataType) {
+        ) FluentInterface([]u8) {
             var items_set = StringBitSet.init();
             var string_set = StringBitSet.init();
 
@@ -1256,6 +1212,7 @@ fn ImmutableStringBackend(comptime Self: type) type {
             return .{ .items = items_set.unionWith(string_set).fillBuffer(union_buffer) };
         }
 
+        /// intersectWith - returns set intersection between acquired slice and given slice
         pub fn intersectWith(
             self: Self,
             string: []const u8,
@@ -1280,13 +1237,12 @@ fn ImmutableStringBackend(comptime Self: type) type {
 
         fn trimLeft(
             self: Self,
-            comptime opt: StringMode,
-            comptime needle: Parameter(Self.DataType, opt),
+            comptime mode: StringMode,
+            comptime needle: Parameter(u8, mode),
         ) usize {
-            if (self.items.len <= 1) return 0;
             var start: usize = 0;
             const end: usize = self.items.len;
-            switch (opt) {
+            switch (mode) {
                 .scalar => {
                     while (start < end and self.items[start] == needle) start += 1;
                 },
@@ -1303,12 +1259,12 @@ fn ImmutableStringBackend(comptime Self: type) type {
 
         fn trimRight(
             self: Self,
-            comptime opt: StringMode, 
-            comptime needle: Parameter(Self.DataType, opt),
+            comptime mode: StringMode, 
+            comptime needle: Parameter(u8, mode),
         ) usize {
             if (self.items.len <= 1) return 0;
             var end: usize = self.items.len;
-            switch (opt) {
+            switch (mode) {
                 .scalar => {
                     while (end > 0 and self.items[end - 1] == needle) end -= 1;
                 },
@@ -1316,12 +1272,86 @@ fn ImmutableStringBackend(comptime Self: type) type {
                     const expression = "(" ++ needle ++ ")$";
                     var itr = Fluent.match(expression, self.items);
                     if (itr.next()) |str| {
-                        end = (itr.index - str.len);
+                        end = (itr.index - str.items.len);
                     }
                 },
             }
             return end;
         }
+
+        fn countAll(
+            self: Self,
+            comptime mode: StringMode,
+            comptime needle: Parameter(u8, mode),
+        ) usize {
+            var result: usize = 0;
+            switch (mode) {
+                .scalar => {
+                    for (self.items) |it| { if (it == needle) result += 1; }
+                },
+                .regex => {
+                    var itr = Fluent.match(needle, self.items);
+                    while (itr.next()) |_| { result += 1; }
+                }
+            }
+            return result;
+        }
+
+        fn countLeft(
+            self: Self,
+            comptime mode: StringMode,
+            comptime needle: Parameter(u8, mode),
+        ) usize {
+            return switch (mode) {
+                .scalar => blk: {
+                    var index: usize = 0;
+                    while (index < self.items.len and self.items[index] == needle) { 
+                        index += 1;
+                    }
+                    break :blk index;
+                },
+                .regex => blk: {
+                    const tree = ParseRegexTree(needle);
+                    var index: usize = 0;
+                    var amount: usize = 0;
+                    while (tree.call(self.items, index, false)) |n| : (index += n) {
+                        amount += 1;
+                    }
+                    break :blk amount;
+                },
+            };
+        }
+
+        fn countRight(
+            self: Self,
+            comptime mode: StringMode,
+            comptime needle: Parameter(u8, mode),
+        ) usize {
+            return switch (mode) {
+                .scalar => blk: {
+                    var index: usize = self.items.len;
+                    var amount: usize = 0;
+                    while (index >= 1) {
+                        index -= 1;
+                        if (needle != self.items[index]) break :blk amount;
+                        amount += 1;
+                    }
+                    break :blk amount;
+                },
+                .regex => blk: {
+                    const tree = ParseRegexTree(needle);
+                    var index: usize = 0;
+                    var amount: usize = 0;
+                    while (true) : ({ index += 1; amount = 0; }) {
+                        while (tree.call(self.items, index, false)) |n| : (index += n) {
+                            amount += 1;
+                        }
+                        if (index >= self.items.len) break :blk amount;
+                    }
+                },
+            };
+        }
+
     };
 }
 
@@ -1342,17 +1372,75 @@ fn MutableStringBackend(comptime Self: type) type {
 
         pub usingnamespace GeneralMutableBackend(Self);
 
+        /// lower - transform all alphabetic characters to lower case
         pub fn lower(self: Self) Self {
             for (self.items) |*c| c.* = std.ascii.toLower(c.*);
             return self;
         }
 
+        /// upper - transform all alphabetic characters to upper case
         pub fn upper(self: Self) Self {
             for (self.items) |*c| c.* = std.ascii.toUpper(c.*);
             return self;
         }
 
-        // more inline with the actual python behavior
+        /// replaces values in string with a provided string.
+        /// Panics if the replacement string size is larger than 
+        /// the minimum number of possible matches.
+        pub fn replace(
+            self: Self,
+            comptime mode: StringMode,
+            comptime needle: Parameter(u8, mode),
+            replacement: Parameter(u8, mode),
+        ) Self {
+            if (self.items.len == 0) return self;
+            
+            switch (mode) {
+                .scalar => { 
+                    std.mem.replaceScalar(u8, self.items, needle, replacement);
+                    return self;
+                },
+                .regex => {
+                    const tree = comptime ParseRegexTree(needle);
+                    const min_matches = comptime tree.minMatches();
+
+                    if (comptime min_matches == 0) 
+                        @compileError("replacment matches must be greater than zero");
+
+                    std.debug.assert(replacement.len <= min_matches);
+
+                    var r: usize = 0; // read
+                    var w: usize = 0; // write
+
+                    while (r < self.items.len) {
+
+                        if (tree.call(self.items, r, false)) |match_end| {
+
+                            if (r == match_end) {
+                                r += 1;
+                                continue;
+                            }
+                            // copy from where the write head starts
+                            @memcpy(self.items[w..][0..replacement.len], replacement);
+                            // advance write head by size of replacement
+                            w += replacement.len;
+                            // start next read at last match's end
+                            r = match_end;
+
+                            continue;
+                        }
+                        
+                        self.items[w] = self.items[r];
+                        r += 1;
+                        w += 1;
+                    }
+
+                    return .{ .items = self.items[0..w] };
+                }
+            }
+        }
+
+        /// capitalize - transform first character to upper case and rest to lower case
         pub fn capitalize(self: Self) Self {
             if (self.items.len > 0)
                 self.items[0] = std.ascii.toUpper(self.items[0]);
@@ -1363,6 +1451,7 @@ fn MutableStringBackend(comptime Self: type) type {
             return self;
         }
 
+        /// title - capitalize each sequence separated by spaces
         pub fn title(self: Self) Self {
             var i: usize = 0;
             var prev: u8 = ' ';
@@ -1399,6 +1488,7 @@ const StringBitSet = struct {
 
     bits: [4]BackingSet,
 
+    /// init - returns an initEmpty instance of StringBitSet
     pub fn init() StringBitSet {
         return .{ .bits = .{
             BackingSet.initEmpty(),
@@ -1408,6 +1498,7 @@ const StringBitSet = struct {
         } };
     }
 
+    /// setValue - sets the value of the bit at the specified position
     pub fn setValue(self: *StringBitSet, pos: usize, value: bool) void {
         const mod_pos = pos & 63;
         switch (pos) {
@@ -1418,6 +1509,8 @@ const StringBitSet = struct {
             else => unreachable,
         }
     }
+
+    /// isSet - checks if the bit at the specified position is set
     pub fn isSet(self: *const StringBitSet, pos: usize) bool {
         const mod_pos = pos & 63;
         return switch (pos) {
@@ -1428,6 +1521,8 @@ const StringBitSet = struct {
             else => unreachable,
         };
     }
+
+    /// unionWith - computes the union of two StringBitSets
     pub fn unionWith(self: StringBitSet, other: StringBitSet) StringBitSet {
         return .{ .bits = .{
             self.bits[0].unionWith(other.bits[0]),
@@ -1436,6 +1531,8 @@ const StringBitSet = struct {
             self.bits[3].unionWith(other.bits[3]),
         } };
     }
+
+    /// differenceWith - computes the difference of two StringBitSets
     pub fn differenceWith(self: StringBitSet, other: StringBitSet) StringBitSet {
         return .{ .bits = .{
             self.bits[0].differenceWith(other.bits[0]),
@@ -1444,6 +1541,8 @@ const StringBitSet = struct {
             self.bits[3].differenceWith(other.bits[3]),
         } };
     }
+
+    /// intersectWith - computes the intersection of two StringBitSets
     pub fn intersectWith(self: StringBitSet, other: StringBitSet) StringBitSet {
         return .{ .bits = .{
             self.bits[0].intersectWith(other.bits[0]),
@@ -1453,10 +1552,12 @@ const StringBitSet = struct {
         } };
     }
 
+    /// count - counts the number of set bits in the StringBitSet
     pub fn count(self: StringBitSet) usize {
         return self.bits[0].count() + self.bits[1].count() + self.bits[2].count() + self.bits[3].count();
     }
 
+    /// fillBuffer - fills a buffer with the values of set bits in the StringBitSet
     pub fn fillBuffer(self: *const StringBitSet, buffer: []u8) []u8 {
         var val: usize = 0;
         var pos: usize = 0;
@@ -1474,26 +1575,16 @@ const StringBitSet = struct {
 // ENUMERATED OPTIONS :                                                         //
 //////////////////////////////////////////////////////////////////////////////////
 
-const CountOption = enum {
+const DirectionOption = enum {
     all,
-    leading,
-    trailing,
-    until,
-    periphery,
-    inside,
-    inverse,
+    left,
+    right,
 };
 
 const ReplaceOption = enum {
     first,
     last,
     all,
-    periphery,
-};
-
-const DirectionOption = enum {
-    left,
-    right,
     periphery,
 };
 
@@ -1504,8 +1595,8 @@ const TrimOptions = enum {
 };
 
 const SortDirection = enum {
-    ascending,
-    descending,
+    asc,
+    desc,
 };
 
 const SampleOption = enum {
@@ -1717,7 +1808,6 @@ const RegexCharacter = struct {
     char: u8,
 };
 
-// TODO: change to RegexSymbol?
 const RegexSymbol = union(enum) {
     s: RegexCharacter,
     q: RegexQuantifier,
@@ -1761,7 +1851,7 @@ fn parseQuantity(comptime escaped: []const RegexEscaped) usize {
             @compileError("parseQuantity: invalid char");
         }
         if (comptime i == 0 and escaped[i].char == '0' and escaped.len > 1) {
-            @compileError("parseQuantity: leading zero in integer");
+            @compileError("parseQuantity: head zero in integer");
         }
 
         const value = escaped[i].char - '0';
@@ -1820,7 +1910,7 @@ fn fuseQuantifiers(
     comptime es: []const RegexEscaped,
 ) []const RegexSymbol {
     comptime {
-        @setEvalBranchQuota(2147463647);
+        @setEvalBranchQuota(200_000);
         if (isRegexQuantifier(es[0])) {
             @compileError("fuseQuantifiers: 0th symbol cannot be a quanitifier");
         }
@@ -2022,12 +2112,27 @@ fn pipeSearch(
     return i;
 }
 
+
+// TODO:
+//  Consider only using this for alternation branches and make
+//  a special character set branch that takes in a substring
+//  instead of parsing one character at a time.
+
 fn RegexOR(
     // used for "|" or [abc] clauses
     comptime lhs: type,
     comptime rhs: type,
 ) type {
     return struct {
+
+        pub fn minMatches() usize {
+            if (comptime @hasDecl(rhs, "minMatches")) {
+                return @min(lhs.minMatches(), rhs.minMatches());
+            } else {
+                return lhs.minMatches();
+            }
+        }
+        
         pub fn call(str: []const u8, i: usize, prev: bool) ?usize {
             if (comptime @hasDecl(rhs, "call")) {
                 return lhs.call(str, i, prev) orelse rhs.call(str, i, prev);
@@ -2039,11 +2144,29 @@ fn RegexOR(
 }
 
 fn RegexAND(
-    // used for anything outside of [] clauses,
     comptime lhs: type,
     comptime rhs: type,
 ) type {
     return struct {
+
+        pub fn minMatches() usize {
+            const matches: usize = blk: {
+                const q = lhs.quantifier orelse break :blk 1;
+                break :blk switch (q) {
+                    .any => 0,
+                    .exact => |n| n,
+                    .between => |b| b.start,
+                    .one_or_more => 1,
+                    .optional => 0,
+                };
+            };
+            if (comptime @hasDecl(rhs, "minMatches")) {
+                return @max(matches + rhs.minMatches(), 1);
+            } else {
+                return @max(matches, 1);
+            }
+        }
+
         pub fn call(str: []const u8, i: usize, prev: bool) ?usize {
 
             // NOTE:
@@ -2076,7 +2199,6 @@ fn RegexAND(
                             while (count < b.start and idx < str.len) : (count += 1) {
                                 idx = lhs.call(str, idx, prev) orelse return null;
                             }
-
                             // idx < str.len can break above loop early
                             if (count < b.start) return null;
 
@@ -2117,10 +2239,8 @@ fn RegexAND(
                             last = rhs.call(str, idx, false) orelse last;
                             idx = lhs.call(str, idx, prev) orelse break;
                         }
-
                         return rhs.call(str, idx, i != idx) orelse last;
                     },
-
                     .exact => |n| {
                         var idx: usize = i;
                         for (0..n) |_| {
@@ -2128,7 +2248,6 @@ fn RegexAND(
                         }
                         return rhs.call(str, idx, true);
                     },
-
                     .between => |b| {
                         var idx: usize = i;
                         var count: usize = 0;
@@ -2149,7 +2268,6 @@ fn RegexAND(
                         // idx could have advanced - check again
                         return rhs.call(str, idx, (i != idx) or prev) orelse last;
                     },
-
                     .one_or_more => {
                         var idx: usize = lhs.call(str, i, prev) orelse return null;
 
@@ -2162,12 +2280,11 @@ fn RegexAND(
                         // at least one match above has occured
                         return rhs.call(str, idx, true) orelse last;
                     },
-
                     .optional => {
                         // a match hasn't occurred so we defer to previous
                         const j = lhs.call(str, i, prev) orelse return rhs.call(str, i, prev);
                         // a match must have occured so we switch to true
-                        return rhs.call(str, j, true) orelse rhs.call(str, i, true);
+                        return rhs.call(str, j, true) orelse rhs.call(str, i, prev);
                     },
                 }
             } else {
@@ -2183,19 +2300,47 @@ fn RegexAND(
 fn RegexNAND(
     // only used for [^abc] type clauses,
     // should only appear in that context
-    comptime this: type,
-    comptime next: type,
+    comptime lhs: type,
+    comptime rhs: type,
 ) type {
     return struct {
+        pub fn minMatches() usize {
+            return 1; // NAND can only connect to other NANDs
+        }
         pub fn call(str: []const u8, i: usize, prev: bool) ?usize {
-            const j = this.call(str, i, prev) orelse return null;
-            if (comptime @hasDecl(next, "call")) {
-                return next.call(str, i, prev);
+            const j = lhs.call(str, i, prev) orelse return null;
+            if (comptime @hasDecl(rhs, "call")) {
+                return rhs.call(str, i, prev);
             } else {
                 return j;
             }
         }
     };
+}
+
+fn RegexLookAhead(
+    // only used for (?=) and (?!) type clauses,
+    // should only appear in those contextes
+    comptime this: type,
+    comptime positive: bool,
+) type {
+    return struct {
+        pub fn minMatches() usize {
+            return 0; // only precedes or follows a match
+        }
+        pub inline fn call(str: []const u8, i: usize, prev: bool) ?usize {
+            if (comptime @hasDecl(this, "call")) {
+                if (comptime positive) {
+                    return if (this.call(str, i, prev)) |_| i else null;
+                } else {
+                    return if (this.call(str, i, prev)) |_| null else i;
+                }
+            } else {
+                // case of empty lookahead
+                return if (comptime positive) i else null;
+            }
+        }
+    };            
 }
 
 fn RegexUnit(
@@ -2244,7 +2389,7 @@ fn ParseRegexTreeBreadth(
     }
 }
 
-fn InvertRegex(
+fn invertRegex(
     typical: bool, // what is the function typically?
     inverse: bool, // what does the circumstance indicate?
     function: fn (u8) bool,
@@ -2262,7 +2407,7 @@ fn InvertRegex(
     }
 }
 
-fn EqualRegex(
+fn equalRegex(
     comptime char: u8,
 ) fn (u8) bool {
     return struct {
@@ -2273,7 +2418,7 @@ fn EqualRegex(
 }
 
 
-fn SpanRegex(
+fn spanRegex(
     comptime a: u8,
     comptime b: u8,
 ) fn (u8) bool {
@@ -2323,12 +2468,41 @@ fn endsWithRegex(
     return if (str.len > 0 and i == str.len) i else null;
 }
 
+fn isWordBoundary(
+    str: []const u8,
+    i: usize,
+) ?usize {
+
+    if (str.len == 0) 
+        return null;
+
+    if (i == 0){
+        return if (isWordCharacter(str[i])) i else null;
+    }
+    if (i == str.len){
+        return if (isWordCharacter(str[i - 1])) i else null;
+    }
+    if (isWordCharacter(str[i]) and !isWordCharacter(str[i - 1])) {
+        return i;
+    }
+    if (isWordCharacter(str[i]) and !isWordCharacter(str[i + 1])) {
+        return i + 1;
+    }
+    return null;
+}
+
+fn isNotWordBoundary(
+    str: []const u8,
+    i: usize,
+) ?usize {
+    return if (isWordBoundary(str, i) == null) i else null; 
+}
+
 fn ParseRegexTreeDepth(
     comptime sq: []const RegexSymbol,
     comptime enclosing: u8,
 ) type {
     comptime {
-        const tag = std.meta.activeTag;
 
         if (sq.len == 0)
             return struct {}; // terminal node
@@ -2345,8 +2519,30 @@ fn ParseRegexTreeDepth(
                 if (isRegexBracket(s)) {
                     // this branch deduces an entire sub-automaton
                     var closing = closingBracket(sq, bracketSet(s), 0);
-                    // parse everything between the brackets
-                    const T: type = ParseRegexTreeBreadth(sq[1..closing], s.char);
+
+                    const T: type = blk: {
+                        if (closing > 2 and s.char == '(') {
+
+                            if (_sq[1] != .q or _sq[2] != .s) {
+                                break :blk ParseRegexTreeBreadth(sq[1..closing], s.char);                                
+                            }
+                            const t = _sq[1].q;
+                            const u = _sq[2].s;
+
+                            if (t == .optional) {
+                                if (u.char == '=' and !u.escaped) { // (?=
+                                    break :blk RegexLookAhead(ParseRegexTreeBreadth(sq[3..closing], s.char), true);
+                                }
+                                if (u.char == '!' and !u.escaped) { // (?!
+                                    break :blk RegexLookAhead(ParseRegexTreeBreadth(sq[3..closing], s.char), false);
+                                }
+                            }
+                        }
+
+                        // parse everything between the brackets
+                        break :blk ParseRegexTreeBreadth(sq[1..closing], s.char);
+                    };
+
                     // the entire automaton can be quantified
                     const q: ?RegexQuantifier =
                         if (closing + 1 >= _sq.len) null else switch (_sq[closing + 1]) {
@@ -2365,12 +2561,12 @@ fn ParseRegexTreeDepth(
                 use_nand = s.negated and s.in_square;
 
                 // implements [a-z] character spans...
-                if (_sq.len >= 3 and s.in_square and tag(_sq[1]) == .s and tag(_sq[2]) == .s) {
+                if (_sq.len >= 3 and s.in_square and _sq[1] == .s and _sq[2] == .s) {
                     const t = _sq[1].s;
                     const u = _sq[2].s;
                     if (t.char == '-' and !t.escaped and u.in_square) {
                         _sq = _sq[3..];
-                        break :outer RegexUnit(InvertRegex(true, s.negated, SpanRegex(s.char, u.char)), null);
+                        break :outer RegexUnit(invertRegex(true, s.negated, spanRegex(s.char, u.char)), null);
                     }
                 }
 
@@ -2387,16 +2583,18 @@ fn ParseRegexTreeDepth(
 
                 if (s.escaped) {
                     switch (s.char) {
-                        'w' => break :outer RegexUnit(InvertRegex(true, s.negated, isWordCharacter), q),
-                        'W' => break :outer RegexUnit(InvertRegex(false, s.negated, isWordCharacter), q),
-                        'd' => break :outer RegexUnit(InvertRegex(true, s.negated, std.ascii.isDigit), q),
-                        'D' => break :outer RegexUnit(InvertRegex(false, s.negated, std.ascii.isDigit), q),
-                        's' => break :outer RegexUnit(InvertRegex(true, s.negated, std.ascii.isWhitespace), q),
-                        'S' => break :outer RegexUnit(InvertRegex(false, s.negated, std.ascii.isWhitespace), q),
-                        'h' => break :outer RegexUnit(InvertRegex(true, s.negated, isHorizontalWhitespace), q),
-                        'H' => break :outer RegexUnit(InvertRegex(false, s.negated, isHorizontalWhitespace), q),
-                        'v' => break :outer RegexUnit(InvertRegex(true, s.negated, isVerticalWhitespace), q),
-                        'V' => break :outer RegexUnit(InvertRegex(false, s.negated, isVerticalWhitespace), q),
+                        'w' => break :outer RegexUnit(invertRegex(true, s.negated, isWordCharacter), q),
+                        'W' => break :outer RegexUnit(invertRegex(false, s.negated, isWordCharacter), q),
+                        'd' => break :outer RegexUnit(invertRegex(true, s.negated, std.ascii.isDigit), q),
+                        'D' => break :outer RegexUnit(invertRegex(false, s.negated, std.ascii.isDigit), q),
+                        's' => break :outer RegexUnit(invertRegex(true, s.negated, std.ascii.isWhitespace), q),
+                        'S' => break :outer RegexUnit(invertRegex(false, s.negated, std.ascii.isWhitespace), q),
+                        'h' => break :outer RegexUnit(invertRegex(true, s.negated, isHorizontalWhitespace), q),
+                        'H' => break :outer RegexUnit(invertRegex(false, s.negated, isHorizontalWhitespace), q),
+                        'v' => break :outer RegexUnit(invertRegex(true, s.negated, isVerticalWhitespace), q),
+                        'V' => break :outer RegexUnit(invertRegex(false, s.negated, isVerticalWhitespace), q),
+                        'b' => break :outer RegexUnit(if (s.negated) isNotWordBoundary else isWordBoundary, q),
+                        'B' => break :outer RegexUnit(if (s.negated) isWordBoundary else isNotWordBoundary, q),
                         else => {},
                     }
                 } else {
@@ -2415,10 +2613,14 @@ fn ParseRegexTreeDepth(
                 }
 
                 // default to direct equals
-                break :outer RegexUnit(InvertRegex(true, s.negated, EqualRegex(s.char)), q);
+                break :outer RegexUnit(invertRegex(true, s.negated, equalRegex(s.char)), q);
             },
-            .q => @compileError("ParseRegexTreeRecursive: leading quantifier"),
+            .q => @compileError("ParseRegexTreeRecursive: head quantifier"),
         };
+
+        // TODO:
+        //  Currently, OR branches get embedded inside at least one AND.
+        //  Consider flattening this and going directly to OR branch instead.
 
         if (use_nand) {
             return RegexNAND(Node, ParseRegexTreeDepth(_sq, enclosing));
@@ -2449,7 +2651,7 @@ const expectEqSlice = std.testing.expectEqualSlices;
 // @TEST : IMMUTABLE BACKEND                                                  //
 ////////////////////////////////////////////////////////////////////////////////
 
-test "findFrom(self, mode, start_index, needle) : scalar\n" {
+test "findFrom(self, mode, start_index, needle) : scalar" {
     const self = init("This is a test");
 
     {
@@ -2458,7 +2660,6 @@ test "findFrom(self, mode, start_index, needle) : scalar\n" {
     }
 
     {
-        std.debug.print("in between\n", .{});
         const result = self.findFrom(.scalar, 12, 't') orelse unreachable;
         try expect(result == 13);
     }
@@ -2469,38 +2670,43 @@ test "findFrom(self, mode, start_index, needle) : scalar\n" {
     }
 }
 
-test "findFrom(self, mode, start_index, needle) : regex\n" {
+test "findFrom(self, mode, start_index, needle) : regex" {
     const self = init("This is a test");
     {
         const result = self.findFrom(.regex, 0, "This") orelse unreachable;
-        try expect(result == 0);
+        try testing.expectEqual(result.pos, 0);
+        try testing.expectEqual(result.end, 4);
     }
     {
         const result = self.findFrom(.regex, 9, "test") orelse unreachable;
-
-        try std.testing.expectEqual(10, result);
+        try testing.expectEqual(10, result.pos);
+        try testing.expectEqual(14, result.end);
     }
     {
         const result = self.findFrom(.regex, 5, "is") orelse unreachable;
-        try expect(result == 5);
+        try testing.expectEqual(result.pos, 5);
+        try testing.expectEqual(result.end, 7);
     }
     {
         const result = self.findFrom(.regex, 0, "[T]") orelse unreachable;
-        try expect(result == 0);
+        try testing.expectEqual(result.pos, 0);
+        try testing.expectEqual(result.end, 1);
     }
     {
         const result = self.findFrom(.regex, 9, "[test]") orelse unreachable;
-        try expect(result == 10);
+        try testing.expectEqual(result.pos, 10);
+        try testing.expectEqual(result.end, 11);
     }
     {
         const result = self.findFrom(.regex, 5, "[is]") orelse unreachable;
-        try expect(result == 5);
+        try testing.expectEqual(result.pos, 5);
+        try testing.expectEqual(result.end, 6);
     }
 }
 
 ////////////////////////////////////////////////////////////////////////////////
 
-test "find(self, mode, needle)                  : scalar\n" {
+test "find(self, mode, needle)                  : scalar" {
     const self = init("This is a testz");
 
     {
@@ -2519,7 +2725,7 @@ test "find(self, mode, needle)                  : scalar\n" {
 
 ////////////////////////////////////////////////////////////////////////////////
 
-test "containsFrom(self, mode, needle)          : scalar\n" {
+test "containsFrom(self, mode, needle)          : scalar" {
     const self = init("This is a test");
 
     {
@@ -2536,7 +2742,7 @@ test "containsFrom(self, mode, needle)          : scalar\n" {
     }
 }
 
-test "containsFrom(self, mode, needle)          : sequence\n" {
+test "containsFrom(self, mode, needle)          : sequence" {
     const self = init("This is a test");
 
     {
@@ -2567,7 +2773,7 @@ test "containsFrom(self, mode, needle)          : sequence\n" {
 
 ////////////////////////////////////////////////////////////////////////////////
 
-test "contains(self, mode, needle)             : scalar\n" {
+test "contains(self, mode, needle)              : scalar" {
     const self = init("This is a testz");
 
     {
@@ -2584,7 +2790,7 @@ test "contains(self, mode, needle)             : scalar\n" {
     }
 }
 
-test "contains(self, mode, needle)             : regex\n" {
+test "contains(self, mode, needle)              : regex" {
     const self = init("This is a testz");
 
     {
@@ -2615,7 +2821,7 @@ test "contains(self, mode, needle)             : regex\n" {
 
 ////////////////////////////////////////////////////////////////////////////////
 
-test "getAt(self, idx)                         : scalar\n" {
+test "getAt(self, idx)                          : scalar" {
     const self = init("This is a testz");
 
     {
@@ -2636,249 +2842,171 @@ test "getAt(self, idx)                         : scalar\n" {
 
 ////////////////////////////////////////////////////////////////////////////////
 
-//test "startsWith(self, mode, needle)           : scalar\n" {
-//    const self = init("This is a testz");
-//
-//    {
-//        const result = self.startsWith(.scalar, 'T');
-//        try expect(result == true);
-//    }
-//
-//    {
-//        const result = self.startsWith(.scalar, 't');
-//        try expect(result == false);
-//    }
-//
-//    {
-//        const result = self.startsWith(.scalar, 'z');
-//        try expect(result == false);
-//    }
-//}
-//
-//test "startsWith(self, mode, needle)           : sequence" {
-//    const self = init("This is a testz");
-//
-//    {
-//        const result = self.startsWith(.sequence, "This");
-//        try expect(result == true);
-//    }
-//
-//    {
-//        const result = self.startsWith(.sequence, "testz");
-//        try expect(result == false);
-//    }
-//
-//    {
-//        const result = self.startsWith(.sequence, "is");
-//        try expect(result == false);
-//    }
-//}
-//
-//test "startsWith(self, mode, needle)           : any" {
-//    const self = init("This is a testz");
-//
-//    {
-//        const result = self.startsWith(.sequence, "This");
-//        try expect(result == true);
-//    }
-//
-//    {
-//        const result = self.startsWith(.sequence, "testz");
-//        try expect(result == false);
-//    }
-//
-//    {
-//        const result = self.startsWith(.sequence, "is");
-//        try expect(result == false);
-//    }
-//}
+test "startsWith(self, mode, needle)            : scalar" {
+    const items = [_]u32{0,1,2,3,4,5,6,7,8,9};
+    const self = init(items[0..]);
 
-////////////////////////////////////////////////////////////////////////////////
+    {
+        const result = self.startsWith(.scalar, 0);
+        try expect(result == true);
+    }
 
-//test "endsWith(self, mode, needle)             : scalar" {
-//    const self = init("This is a testz");
-//
-//    {
-//        const result = self.endsWith(.scalar, 'z');
-//        try expect(result == true);
-//    }
-//
-//    {
-//        const result = self.endsWith(.scalar, 't');
-//        try expect(result == false);
-//    }
-//
-//    {
-//        const result = self.endsWith(.scalar, 'T');
-//        try expect(result == false);
-//    }
-//}
-//
-//test "endsWith(self, mode, needle)             : sequence" {
-//    const self = init("This is a testz");
-//
-//    {
-//        const result = self.endsWith(.sequence, "testz");
-//        try expect(result == true);
-//    }
-//
-//    {
-//        const result = self.endsWith(.sequence, "This");
-//        try expect(result == false);
-//    }
-//
-//    {
-//        const result = self.endsWith(.sequence, "is");
-//        try expect(result == false);
-//    }
-//}
-//
-//test "endsWith(self, mode, needle)             : any" {
-//    const self = init("This is a testz");
-//
-//    {
-//        const result = self.endsWith(.sequence, "testz");
-//        try expect(result == true);
-//    }
-//
-//    {
-//        const result = self.endsWith(.sequence, "this");
-//        try expect(result == false);
-//    }
-//
-//    {
-//        const result = self.endsWith(.sequence, "is");
-//        try expect(result == false);
-//    }
-//}
+    {
+        const result = self.startsWith(.scalar, 1);
+        try expect(result == false);
+    }
 
-////////////////////////////////////////////////////////////////////////////////
+    {
+        const result = self.startsWith(.scalar, 9);
+        try expect(result == false);
+    }
+}
 
-//test "count(self, opt, mode, needle)           : scalar" {
-//    const self = init("000_111_000");
-//
-//    {
-//        const result = self.count(.all, .scalar, '0');
-//        try expect(result == 6);
-//    }
-//
-//    {
-//        const result = self.count(.leading, .scalar, '0');
-//        try expect(result == 3);
-//    }
-//
-//    {
-//        const result = self.count(.trailing, .scalar, '0');
-//        try expect(result == 3);
-//    }
-//
-//    {
-//        const result = self.count(.until, .scalar, '1');
-//        try expect(result == 4);
-//    }
-//
-//    {
-//        const result = self.count(.periphery, .scalar, '0');
-//        try expect(result == 6);
-//    }
-//
-//    {
-//        const result = self.count(.inside, .scalar, '0');
-//        try expect(result == 0);
-//    }
-//
-//    {
-//        const result = self.count(.inverse, .scalar, '0');
-//        try expect(result == self.items.len - 6);
-//    }
-//    {
-//        // left and right are equal, should return length of array
-//        const result = init("0000000").count(.periphery, .scalar, '0');
-//        try expect(result == 7);
-//    }
-//}
-//
-//test "count(self, opt, mode, needle)           : sequence" {
-//    const self = init("000_111_000");
-//
-//    {
-//        const result = self.count(.all, .sequence, "000");
-//        try expect(result == 2);
-//    }
-//
-//    {
-//        const result = self.count(.leading, .sequence, "000");
-//        try expect(result == 1);
-//    }
-//
-//    {
-//        const result = self.count(.trailing, .sequence, "000");
-//        try expect(result == 1);
-//    }
-//
-//    {
-//        const result = self.count(.until, .sequence, "000");
-//        try expect(result == 0);
-//    }
-//
-//    {
-//        const result = self.count(.periphery, .sequence, "000");
-//        try expect(result == 2);
-//    }
-//
-//    {
-//        const result = self.count(.inside, .sequence, "111");
-//        try expect(result == 1);
-//    }
-//
-//    {
-//        const result = self.count(.inverse, .sequence, "000");
-//        try expect(result == self.items.len - 2);
-//    }
-//}
-//
-//test "count(self, opt, mode, needle)           : any" {
-//    const self = init("000_111_000");
-//
-//    {
-//        const result = self.count(.all, .any, "01_");
-//        try expect(result == self.items.len);
-//    }
-//
-//    {
-//        const result = self.count(.leading, .any, "0_");
-//        try expect(result == 4);
-//    }
-//
-//    {
-//        const result = self.count(.trailing, .any, "0_");
-//        try expect(result == 4);
-//    }
-//
-//    {
-//        const result = self.count(.until, .any, "_111_");
-//        try expect(result == 3);
-//    }
-//
-//    {
-//        const result = self.count(.periphery, .any, "_0");
-//        try expect(result == 8);
-//    }
-//
-//    {
-//        const result = self.count(.inside, .any, "1_");
-//        try expect(result == 5);
-//    }
-//
-//    {
-//        const result = self.count(.inverse, .any, "0_");
-//        try expect(result == 3);
-//    }
-//}
-//
 //////////////////////////////////////////////////////////////////////////////////
 
-test "slice(self, start, end)                  : [start..end]\n" {
+test "startsWith(self, mode, needle)           : sequence" {
+    const items = [_]u32{0,1,2,3,4,5,6,7,8,9};
+    const needle = [_]u32{0,1,2};
+    const self = init(items[0..]);
+
+    {
+        const result = self.startsWith(.sequence, needle[0..]);
+        try expect(result == true);
+    }
+
+    {
+        const result = self.startsWith(.sequence, needle[1..]);
+        try expect(result == false);
+    }
+
+    {
+        const result = self.startsWith(.sequence, &[_]u32{9,8,7});
+        try expect(result == false);
+    }
+}
+
+test "startsWith(self, mode, needle)           : any" {
+    const items = [_]u32{0,1,2,3,4,5,6,7,8,9};
+    const needle = [_]u32{0,1,2};
+    const self = init(items[0..]);
+
+    {
+        const result = self.startsWith(.any, needle[0..]);
+        try expect(result == true);
+    }
+
+    {
+        const result = self.startsWith(.any, needle[1..]);
+        try expect(result == false);
+    }
+
+    {
+        const result = self.startsWith(.any, &[_]u32{9,8,7});
+        try expect(result == false);
+    }
+}
+
+////////////////////////////////////////////////////////////////////////////////
+
+test "endsWith(self, mode, needle)             : scalar" {
+    const items = [_]u32{0,1,2,3,4,5,6,7,8,9};
+    const self = init(items[0..]);
+
+    {
+        const result = self.endsWith(.scalar, 9);
+        try expect(result == true);
+    }
+
+    {
+        const result = self.endsWith(.scalar, 8);
+        try expect(result == false);
+    }
+
+    {
+        const result = self.endsWith(.scalar, 0);
+        try expect(result == false);
+    }
+}
+
+test "endsWith(self, mode, needle)             : sequence" {
+    const items = [_]u32{0,1,2,3,4,5,6,7,8,9};
+    const self = init(items[0..]);
+
+    {
+        const result = self.endsWith(.sequence, &[_]u32{7,8,9});
+        try expect(result == true);
+    }
+
+    {
+        const result = self.endsWith(.sequence, &[_]u32{9,8,7});
+        try expect(result == false);
+    }
+
+    {
+        const result = self.endsWith(.sequence, &[_]u32{6,8,9});
+        try expect(result == false);
+    }
+}
+
+test "endsWith(self, mode, needle)             : any" {
+    const items = [_]u32{0,1,2,3,4,5,6,7,8,9};
+    const self = init(items[0..]);
+
+    {
+        const result = self.endsWith(.any, &[_]u32{7,8,9});
+        try expect(result == true);
+    }
+
+    {
+        const result = self.endsWith(.any, &[_]u32{6,8,7});
+        try expect(result == false);
+    }
+
+    {
+        const result = self.endsWith(.any, &[_]u32{7,8,2});
+        try expect(result == false);
+    }
+}
+
+
+////////////////////////////////////////////////////////////////////////////////
+
+test "count(self, opt, mode, needle)            : scalar" {
+    const self = init("000_111_000");
+
+    {
+        const result = self.count(.all, .scalar, '0');
+        try std.testing.expectEqual(6, result);
+    }
+    {
+        const result = self.count(.left, .scalar, '0');
+        try std.testing.expectEqual(3, result);
+    }
+    {
+        const result = self.count(.right, .scalar, '0');
+        try std.testing.expectEqual(3, result);
+    }
+}
+
+test "count(self, opt, mode, needle)            : regex" {
+    const self = init("000_111_000");
+    {
+        const result = self.count(.all, .regex, "000");
+        try expect(result == 2);
+    }
+    {
+        const result = self.count(.left, .regex, "000");
+        try expect(result == 1);
+    }
+    {
+        const result = self.count(.right, .regex, "000");
+        try expect(result == 1);
+    }
+}
+
+//////////////////////////////////////////////////////////////////////////////////
+
+test "slice(self, start, end)                   : [start..end]" {
     const string: []const u8 = "012_345_678";
 
     const self = init(string);
@@ -2907,7 +3035,7 @@ test "slice(self, start, end)                  : [start..end]\n" {
 
 ////////////////////////////////////////////////////////////////////////////////
 
-test "order(self, items)                       : Order\n" {
+test "order(self, items)                        : Order" {
     const self = init(&[_]i32{ 1, 2, 3, 4, 5, 6, 7, 8, 8 });
 
     {
@@ -2938,7 +3066,7 @@ test "order(self, items)                       : Order\n" {
 
 ////////////////////////////////////////////////////////////////////////////////
 
-test "equal(self, items)                       : bool\n" {
+test "equal(self, items)                        : bool" {
     const self_num = init(&[_]i32{ 1, 2, 3, 4, 5, 6, 7, 8, 8 });
     const self_str = init("This is a string");
 
@@ -2965,7 +3093,7 @@ test "equal(self, items)                       : bool\n" {
 
 ////////////////////////////////////////////////////////////////////////////////
 
-test "sum(self)                                : Self.DataType\n" {
+test "sum(self)                                 : Self.DataType" {
     const self = init(try testing_allocator.alloc(i32, 10000));
     defer testing_allocator.free(self.items);
 
@@ -2987,7 +3115,7 @@ test "sum(self)                                : Self.DataType\n" {
 
 ////////////////////////////////////////////////////////////////////////////////
 
-test "product(self)                            : Self.DataType\n" {
+test "product(self)                             : Self.DataType" {
     const self = init(try testing_allocator.alloc(i32, 16));
     defer testing_allocator.free(self.items);
 
@@ -3009,7 +3137,7 @@ test "product(self)                            : Self.DataType\n" {
 
 ////////////////////////////////////////////////////////////////////////////////
 
-test "min(self)                                : Self.DataType\n" {
+test "min(self)                                 : Self.DataType" {
     const self = init(try testing_allocator.alloc(i32, 1024));
     defer testing_allocator.free(self.items);
 
@@ -3042,7 +3170,7 @@ test "min(self)                                : Self.DataType\n" {
 
 ////////////////////////////////////////////////////////////////////////////////
 
-test "max(self)                                : Self.DataType\n" {
+test "max(self)                                 : Self.DataType" {
     const self = init(try testing_allocator.alloc(i32, 1024));
     defer testing_allocator.free(self.items);
 
@@ -3075,16 +3203,13 @@ test "max(self)                                : Self.DataType\n" {
 
 ////////////////////////////////////////////////////////////////////////////////
 
-test "split(self, mode, delimiter)             : SplitIterator\n" {
+test "split(self, mode, delimiter)              : SplitIterator" {
     const self = init("This is a string");
     const expected = [_][]const u8{ "This", "is", "a", "string" };
-
-    {
-        var iter = self.split(.scalar, ' ');
-        for (expected) |item| {
-            const result = init(iter.next() orelse unreachable);
-            try expect(result.equal(item));
-        }
+    var itr = self.split(" ");
+    for (expected) |item| {
+        const result = init(itr.next().?.items);
+        try expect(result.equal(item));
     }
 }
 
@@ -3092,21 +3217,19 @@ test "split(self, mode, delimiter)             : SplitIterator\n" {
 // @TEST : IMMUTABLE STRING BACKEND                                           //
 ////////////////////////////////////////////////////////////////////////////////
 
-test "isDigit(self)                            : bool\n" {
+test "isDigit(self)                             : bool" {
     const test_case = [_][]const u8{ "0", "0123456789", "oops!0123456789", "0123456789oops!" };
-    const expected = [_]bool{ true, true, false, false };
-
-    {
-        for (test_case, expected) |item, answer| {
-            const result = init(item).isDigit();
-            try expect(result == answer);
-        }
+    const expected = [_]bool{ true, true, false, false };  
+    for (test_case, expected) |item, answer| {
+        const result = init(item).isDigit();
+        try expect(result == answer);
     }
+    
 }
 
 ////////////////////////////////////////////////////////////////////////////////
 
-test "isAlpha(self)                            : bool\n" {
+test "isAlpha(self)                             : bool" {
     const test_case = [_][]const u8{ "a", "aaaaaaaaaa", "7aaaaaaaaaaa", "aaaaaaaaaaa7" };
     const expected = [_]bool{ true, true, false, false };
 
@@ -3120,7 +3243,7 @@ test "isAlpha(self)                            : bool\n" {
 
 ////////////////////////////////////////////////////////////////////////////////
 
-test "isSpaces(self)                           : bool\n" {
+test "isSpaces(self)                            : bool" {
     const test_case = [_][]const u8{ " ", "          ", "7           ", "           7" };
     const expected = [_]bool{ true, true, false, false };
 
@@ -3134,7 +3257,7 @@ test "isSpaces(self)                           : bool\n" {
 
 ////////////////////////////////////////////////////////////////////////////////
 
-test "isLower(self)                            : bool\n" {
+test "isLower(self)                             : bool" {
     const test_case = [_][]const u8{ "a", "aaaaaaaaaa", "Aaaaaaaaaaa", "aaaaaaaaaaaA" };
     const expected = [_]bool{ true, true, false, false };
 
@@ -3148,7 +3271,7 @@ test "isLower(self)                            : bool\n" {
 
 ////////////////////////////////////////////////////////////////////////////////
 
-test "isUpper(self)                            : bool\n" {
+test "isUpper(self)                             : bool" {
     const test_case = [_][]const u8{ "A", "AAAAAAAAAA", "aAAAAAAAAAA", "AAAAAAAAAAAa" };
     const expected = [_]bool{ true, true, false, false };
 
@@ -3162,7 +3285,7 @@ test "isUpper(self)                            : bool\n" {
 
 ////////////////////////////////////////////////////////////////////////////////
 
-test "isHex(self)                              : bool\n" {
+test "isHex(self)                               : bool" {
     const test_case = [_][]const u8{ "0", "0123456789ABCDEF", "0123456789abcdef", "0123456789abcdefZig" };
     const expected = [_]bool{ true, true, true, false };
 
@@ -3176,7 +3299,7 @@ test "isHex(self)                              : bool\n" {
 
 ////////////////////////////////////////////////////////////////////////////////
 
-test "isASCII(self)                            : bool\n" {
+test "isASCII(self)                             : bool" {
     const self = init(try testing_allocator.alloc(u8, 255));
     defer testing_allocator.free(self.items);
     for (self.items, 0..255) |*item, i| item.* = @truncate(i);
@@ -3194,7 +3317,7 @@ test "isASCII(self)                            : bool\n" {
 
 ////////////////////////////////////////////////////////////////////////////////
 
-test "isPrintable(self)                        : bool\n" {
+test "isPrintable(self)                         : bool" {
     const self = init(try testing_allocator.alloc(u8, 255));
     defer testing_allocator.free(self.items);
     for (self.items, 0..255) |*item, i| item.* = @truncate(i);
@@ -3212,7 +3335,7 @@ test "isPrintable(self)                        : bool\n" {
 
 ////////////////////////////////////////////////////////////////////////////////
 
-test "isAlnum(self)                            : bool\n" {
+test "isAlnum(self)                             : bool" {
     const self = init(try testing_allocator.alloc(u8, 255));
     defer testing_allocator.free(self.items);
     for (self.items, 0..255) |*item, i| item.* = @truncate(i);
@@ -3242,7 +3365,7 @@ test "isAlnum(self)                            : bool\n" {
 // @TEST : MUTABLE BACKEND                                                    //
 ////////////////////////////////////////////////////////////////////////////////
 
-test "sort(self, opt)                          : MutSelf\n" {
+test "sort(self, opt)                           : MutSelf" {
     const test_case = [_][]const i32{
         &[_]i32{ 6, 5, 4, 3, 2, 1 },
         &[_]i32{ 1, 2, 3, 6, 5, 4 },
@@ -3259,11 +3382,11 @@ test "sort(self, opt)                          : MutSelf\n" {
     };
 
     const sorting_order = [_]SortDirection{
-        .ascending,
-        .ascending,
-        .ascending,
-        .descending,
-        .descending,
+        .asc,
+        .asc,
+        .asc,
+        .desc,
+        .desc,
     };
 
     var buffer: [6]i32 = undefined;
@@ -3273,14 +3396,14 @@ test "sort(self, opt)                          : MutSelf\n" {
             const result = init(buffer[0..])
                 .copy(case)
                 .sort(order);
-            try expect(result.equal(answer) == true);
+            try expect(result.equal(answer));
         }
     }
 }
 
 ////////////////////////////////////////////////////////////////////////////////
 
-test "fill(self, scalar)                       : MutSelf\n" {
+test "fill(self, scalar)                        : MutSelf" {
     var buffer: [32]u8 = undefined;
 
     {
@@ -3293,7 +3416,7 @@ test "fill(self, scalar)                       : MutSelf\n" {
 
 ////////////////////////////////////////////////////////////////////////////////
 
-test "copy(self, scalar)                       : MutSelf\n" {
+test "copy(self, scalar)                        : MutSelf" {
     var buffer: [32]u8 = undefined;
 
     {
@@ -3305,7 +3428,7 @@ test "copy(self, scalar)                       : MutSelf\n" {
 
 ////////////////////////////////////////////////////////////////////////////////
 
-test "concat(self, items, concat_buffer)       : MutSelf\n" {
+test "concat(self, items, concat_buffer)        : MutSelf" {
     const start = "This";
     const expected = "This is a string";
     var start_buffer: [4]u8 = undefined;
@@ -3321,7 +3444,7 @@ test "concat(self, items, concat_buffer)       : MutSelf\n" {
 
 ////////////////////////////////////////////////////////////////////////////////
 
-test "join(self, collection, join_buffer)      : MutSelf\n" {
+test "join(self, collection, join_buffer)       : MutSelf" {
     const collection = &[_][]const u8{
         "11",
         "222",
@@ -3336,98 +3459,72 @@ test "join(self, collection, join_buffer)      : MutSelf\n" {
         const result = init(start_buffer[0..])
             .copy("0")
             .join(collection, join_buffer[0..]);
-        try expect(result.equal("011222333344444") == true);
+        try expect(result.equal("011222333344444"));
     }
 }
 
 ////////////////////////////////////////////////////////////////////////////////
 
-//test "trim(self, opt, kind, actor)             : scalar" {
-//    const source = "     This is a string     ";
-//    var buffer: [source.len]u8 = undefined;
-//
-//    {
-//        const result = init(buffer[0..source.len])
-//            .copy(source)
-//            .trim(.left, .scalar, ' ');
-//        try expect(result.equal(source[5..]));
-//    }
-//
-//    {
-//        const result = init(buffer[0..source.len])
-//            .copy(source)
-//            .trim(.right, .scalar, ' ');
-//        try expect(result.equal(source[0 .. source.len - 5]));
-//    }
-//
-//    {
-//        const result = init(buffer[0..source.len])
-//            .copy(source)
-//            .trim(.periphery, .scalar, ' ');
-//        try expect(result.equal(source[5 .. source.len - 5]));
-//    }
-//}
+test "trim(self, opt, kind, actor)              : scalar" {
+    const source = "     This is a string     ";
+    var buffer: [source.len]u8 = undefined;
+
+    {
+        const result = init(buffer[0..source.len])
+            .copy(source)
+            .trim(.left, .scalar, ' ');
+        try expect(result.equal(source[5..]));
+    }
+    {
+        const result = init(buffer[0..source.len])
+            .copy(source)
+            .trim(.right, .scalar, ' ');
+        try expect(result.equal(source[0..source.len - 5]));
+    }
+    {
+        const result = init(buffer[0..source.len])
+            .copy(source)
+            .trim(.all, .scalar, ' ');
+        try expect(result.equal(source[5..source.len - 5]));
+    }
+    {
+        const result = init("a").trim(.all, .scalar, 'a');
+        try expect(result.items.len == 0);
+    }
+}
 
 ////////////////////////////////////////////////////////////////////////////////
 
-//test "trim(self, opt, kind, actor)             : predicate" {
-//    const source = "     This is a string     ";
-//    var buffer: [source.len]u8 = undefined;
-//
-//    {
-//        const result = init(buffer[0..source.len])
-//            .copy(source)
-//            .trim(.left, .predicate, std.ascii.isWhitespace);
-//        try expect(result.equal(source[5..]));
-//    }
-//
-//    {
-//        const result = init(buffer[0..source.len])
-//            .copy(source)
-//            .trim(.right, .predicate, std.ascii.isWhitespace);
-//        try expect(result.equal(source[0 .. source.len - 5]));
-//    }
-//
-//    {
-//        const result = init(buffer[0..source.len])
-//            .copy(source)
-//            .trim(.periphery, .predicate, std.ascii.isWhitespace);
-//        try expect(result.equal(source[5 .. source.len - 5]));
-//    }
-//}
+test "trim(self, opt, kind, actor)              : regex" {
+    const source = "     This is a string     ";
+    var buffer: [source.len]u8 = undefined;
+    {
+        const result = init(buffer[0..source.len])
+            .copy(source)
+            .trim(.left, .regex, "\\s+");
+        try expect(result.equal("This is a string     "));
+    }
+    {
+        const result = init(buffer[0..source.len])
+            .copy(source)
+            .trim(.right, .regex, "\\s+");
+        try expect(result.equal("     This is a string"));
+    }
+    {
+        const result = init(buffer[0..source.len])
+            .copy(source)
+            .trim(.all, .regex, "\\s+");
+        try expect(result.equal("This is a string"));
+    }
+    {
+        const result = Fluent.init("bababa1abab").trim(.all, .regex, "(ba|ab)+");
+        try expect(result.equal("1"));
+    }
+}
 
 ////////////////////////////////////////////////////////////////////////////////
 
-//test "trim(self, opt, kind, actor)             : set" {
-//    const source = "     This is a string     ";
-//    const set = " \n\t";
-//    var buffer: [source.len]u8 = undefined;
-//
-//    {
-//        const result = init(buffer[0..source.len])
-//            .copy(source)
-//            .trim(.left, .any, set[0..]);
-//        try expect(result.equal(source[5..]));
-//    }
-//
-//    {
-//        const result = init(buffer[0..source.len])
-//            .copy(source)
-//            .trim(.right, .any, set[0..]);
-//        try expect(result.equal(source[0 .. source.len - 5]));
-//    }
-//
-//    {
-//        const result = init(buffer[0..source.len])
-//            .copy(source)
-//            .trim(.periphery, .any, set[0..]);
-//        try expect(result.equal(source[5 .. source.len - 5]));
-//    }
-//}
-
-////////////////////////////////////////////////////////////////////////////////
-
-test "rotate(self, amount)                     : MutSelf\n" {
+test "rotate(self, amount)                      : MutSelf" {
     const string = "00110011";
     var buffer: [8]u8 = undefined;
 
@@ -3437,14 +3534,12 @@ test "rotate(self, amount)                     : MutSelf\n" {
             .rotate(0);
         try expect(result.equal(string));
     }
-
     {
         const result = init(buffer[0..string.len])
             .copy(string)
             .rotate(1);
         try expect(result.equal("10011001"));
     }
-
     {
         const result = init(buffer[0..string.len])
             .copy(string)
@@ -3455,7 +3550,7 @@ test "rotate(self, amount)                     : MutSelf\n" {
 
 ////////////////////////////////////////////////////////////////////////////////
 
-test "reverse(self)                            : MutSelf\n" {
+test "reverse(self)                             : MutSelf" {
     const string = "00110011";
     var buffer: [8]u8 = undefined;
 
@@ -3466,7 +3561,6 @@ test "reverse(self)                            : MutSelf\n" {
             .reverse();
         try expect(result.equal(string));
     }
-
     {
         const result = init(buffer[0..string.len])
             .copy(string)
@@ -3477,7 +3571,7 @@ test "reverse(self)                            : MutSelf\n" {
 
 ////////////////////////////////////////////////////////////////////////////////
 
-test "setAt(self, idx, with)                   : MutSelf\n" {
+test "setAt(self, idx, with)                    : MutSelf" {
     const string = "aabbccdd";
     var buffer: [8]u8 = undefined;
 
@@ -3496,115 +3590,10 @@ test "setAt(self, idx, with)                   : MutSelf\n" {
 }
 
 ////////////////////////////////////////////////////////////////////////////////
-
-//test "replace(self, opt, mode, this, with)     : scalar" {
-//    const string = "abcabcabc";
-//    var buffer: [9]u8 = undefined;
-//
-//    {
-//        const result = init(buffer[0..string.len])
-//            .copy(string)
-//            .replace(.first, .scalar, 'a', 'z');
-//        try expect(result.equal("zbcabcabc"));
-//    }
-//
-//    {
-//        const result = init(buffer[0..string.len])
-//            .copy(string)
-//            .replace(.last, .scalar, 'a', 'z');
-//        try expect(result.equal("abcabczbc"));
-//    }
-//
-//    {
-//        const result = init(buffer[0..string.len])
-//            .copy(string)
-//            .replace(.periphery, .scalar, 'a', 'z');
-//        try expect(result.equal("zbcabczbc"));
-//    }
-//
-//    {
-//        const result = init(buffer[0..string.len])
-//            .copy(string)
-//            .replace(.all, .scalar, 'a', 'z');
-//        try expect(result.equal("zbczbczbc"));
-//    }
-//}
-//
-//////////////////////////////////////////////////////////////////////////////////
-//
-//test "replace(self, opt, mode, this, with)     : sequence" {
-//    const string = "abcabcabc";
-//    var buffer: [9]u8 = undefined;
-//
-//    {
-//        const result = init(buffer[0..string.len])
-//            .copy(string)
-//            .replace(.first, .sequence, "abc", "000");
-//        try expect(result.equal("000abcabc"));
-//    }
-//
-//    {
-//        const result = init(buffer[0..string.len])
-//            .copy(string)
-//            .replace(.last, .sequence, "abc", "000");
-//        try expect(result.equal("abcabc000"));
-//    }
-//
-//    {
-//        const result = init(buffer[0..string.len])
-//            .copy(string)
-//            .replace(.periphery, .sequence, "abc", "000");
-//        try expect(result.equal("000abc000"));
-//    }
-//
-//    {
-//        const result = init(buffer[0..string.len])
-//            .copy(string)
-//            .replace(.all, .sequence, "abc", "000");
-//        try expect(result.equal("000000000"));
-//    }
-//}
-//
-//////////////////////////////////////////////////////////////////////////////////
-//
-//test "replace(self, opt, mode, this, with)     : any" {
-//    const string = "abcabcabc";
-//    var buffer: [9]u8 = undefined;
-//
-//    {
-//        const result = init(buffer[0..string.len])
-//            .copy(string)
-//            .replace(.first, .any, "abc", "Zig");
-//        try expect(result.equal("Zbcabcabc"));
-//    }
-//
-//    {
-//        const result = init(buffer[0..string.len])
-//            .copy(string)
-//            .replace(.last, .any, "abc", "Zig");
-//        try expect(result.equal("abcabcabg"));
-//    }
-//
-//    {
-//        const result = init(buffer[0..string.len])
-//            .copy(string)
-//            .replace(.periphery, .any, "abc", "Zig");
-//        try expect(result.equal("Zbcabcabg"));
-//    }
-//
-//    {
-//        const result = init(buffer[0..string.len])
-//            .copy(string)
-//            .replace(.all, .any, "abc", "Zig");
-//        try expect(result.equal("ZigZigZig"));
-//    }
-//}
-
-////////////////////////////////////////////////////////////////////////////////
 // @TEST : MUTABLE STRING BACKEND                                             //
 ////////////////////////////////////////////////////////////////////////////////
 
-test "lower(self)                              : MutSelf\n" {
+test "lower(self)                               : MutSelf" {
     const string = "THIS IS A STRING";
     var string_buffer: [16]u8 = undefined;
 
@@ -3626,7 +3615,7 @@ test "lower(self)                              : MutSelf\n" {
 
 ////////////////////////////////////////////////////////////////////////////////
 
-test "upper(self)                              : MutSelf\n" {
+test "upper(self)                               : MutSelf" {
     const string = "this is a string";
     var string_buffer: [16]u8 = undefined;
 
@@ -3648,7 +3637,7 @@ test "upper(self)                              : MutSelf\n" {
 
 ////////////////////////////////////////////////////////////////////////////////
 
-test "capitalize(self)                         : MutSelf\n" {
+test "capitalize(self)                          : MutSelf" {
     const string = "THIS IS A STRING";
     var string_buffer: [16]u8 = undefined;
 
@@ -3670,7 +3659,7 @@ test "capitalize(self)                         : MutSelf\n" {
 
 ////////////////////////////////////////////////////////////////////////////////
 
-test "title(self)                              : MutSelf\n" {
+test "title(self)                               : MutSelf" {
     const string = "THIS IS A STRING";
     var string_buffer: [16]u8 = undefined;
 
@@ -3692,7 +3681,7 @@ test "title(self)                              : MutSelf\n" {
 
 ////////////////////////////////////////////////////////////////////////////////
 
-test "differenceWith(self, string, buffer)     : MutSelf\n" {
+test "differenceWith(self, string, buffer)      : MutSelf" {
     const string = "abcd";
     const diff = "abce";
     var start_buffer: [4]u8 = undefined;
@@ -3708,7 +3697,7 @@ test "differenceWith(self, string, buffer)     : MutSelf\n" {
 
 ////////////////////////////////////////////////////////////////////////////////
 
-test "unionWith(self, string, buffer)          : MutSelf\n" {
+test "unionWith(self, string, buffer)           : MutSelf" {
     const string = "abcd";
     const diff = "abce";
     var start_buffer: [4]u8 = undefined;
@@ -3724,7 +3713,7 @@ test "unionWith(self, string, buffer)          : MutSelf\n" {
 
 ////////////////////////////////////////////////////////////////////////////////
 
-test "intersectWith(self, string, buffer)      : MutSelf\n" {
+test "intersectWith(self, string, buffer)       : MutSelf" {
     const string = "abcd";
     const diff = "abce";
     var start_buffer: [4]u8 = undefined;
@@ -3740,7 +3729,7 @@ test "intersectWith(self, string, buffer)      : MutSelf\n" {
 
 ////////////////////////////////////////////////////////////////////////////////
 
-test "string integer and float parsing        : ConstSelf\n" {
+test "string integer and float parsing          : ConstSelf" {
     {
         const result = init("42").digit(usize) catch unreachable;
         try expect(result == 42);
@@ -3753,7 +3742,7 @@ test "string integer and float parsing        : ConstSelf\n" {
 
 ////////////////////////////////////////////////////////////////////////////////
 
-test "filter                                  : ConstSelf\n" {
+test "filter                                    : ConstSelf" {
     const x = init("1ab2cd3hx45");
     var buffer: [32]u8 = undefined;
 
@@ -3769,7 +3758,7 @@ test "filter                                  : ConstSelf\n" {
 }
 ////////////////////////////////////////////////////////////////////////////////
 
-test "reduce                                  : ConstSelf\n" {
+test "reduce                                    : ConstSelf" {
     const all_g = struct {
         fn call(a: bool, b: anytype) bool {
             return a and (b == 'g');
@@ -3791,7 +3780,7 @@ test "reduce                                  : ConstSelf\n" {
 
 ////////////////////////////////////////////////////////////////////////////////
 
-test "mapReduce                                 : ConstSelf\n" {
+test "mapReduce                                 : ConstSelf" {
     const has_g = struct {
         fn call(a: bool, b: anytype) bool {
             return a or (b == 'g');
@@ -3806,7 +3795,7 @@ test "mapReduce                                 : ConstSelf\n" {
 
 ////////////////////////////////////////////////////////////////////////////////
 
-test "iterator                                 : empty range\n" {
+test "iterator                                  : empty range" {
     const slice: []const u8 = "hello";
     const empty: []const u8 = slice[0..0];
     {
@@ -3827,7 +3816,7 @@ test "iterator                                 : empty range\n" {
     }
 }
 
-test "iterator                                 : next\n" {
+test "iterator                                  : next" {
     {
         var itr = Fluent.iterator(.forward, "hello");
         try std.testing.expectEqual(itr.next().?, 'h');
@@ -3848,436 +3837,434 @@ test "iterator                                 : next\n" {
     }
 }
 
-test "iterator                                 : window\n" {
+test "iterator                                  : window" {
     {
         var itr = Fluent.iterator(.forward, "hello");
-        try std.testing.expectEqualSlices(u8, itr.window(3).?, "hel");
-        try std.testing.expectEqualSlices(u8, itr.window(3).?, "ell");
-        try std.testing.expectEqualSlices(u8, itr.window(3).?, "llo");
+        try std.testing.expectEqualSlices(u8, itr.window(3).?.items, "hel");
+        try std.testing.expectEqualSlices(u8, itr.window(3).?.items, "ell");
+        try std.testing.expectEqualSlices(u8, itr.window(3).?.items, "llo");
         try expect(itr.window(3) == null);
     }
     {
         var itr = Fluent.iterator(.reverse, "hello");
-        try std.testing.expectEqualSlices(u8, itr.window(3).?, "llo");
-        try std.testing.expectEqualSlices(u8, itr.window(3).?, "ell");
-        try std.testing.expectEqualSlices(u8, itr.window(3).?, "hel");
+        try std.testing.expectEqualSlices(u8, itr.window(3).?.items, "llo");
+        try std.testing.expectEqualSlices(u8, itr.window(3).?.items, "ell");
+        try std.testing.expectEqualSlices(u8, itr.window(3).?.items, "hel");
         try expect(itr.window(3) == null);
     }
 }
 
-test "regex:                                    : match iterator\n" {
+test "regex                                     : match iterator" {
     { // match special characters (typical) - one or more
         var itr = match("\\d+", "123a456");
-        try std.testing.expectEqualSlices(u8, itr.next() orelse unreachable, "123");
-        try std.testing.expectEqualSlices(u8, itr.next() orelse unreachable, "456");
+        try std.testing.expectEqualSlices(u8, itr.next().?.items, "123");
+        try std.testing.expectEqualSlices(u8, itr.next().?.items, "456");
         try std.testing.expect(itr.next() == null);
     }
     { // match special characters (typical) - exact
         var itr = match("\\d{3}", "123456");
-        try std.testing.expectEqualSlices(u8, itr.next() orelse unreachable, "123");
-        try std.testing.expectEqualSlices(u8, itr.next() orelse unreachable, "456");
+        try std.testing.expectEqualSlices(u8, itr.next().?.items, "123");
+        try std.testing.expectEqualSlices(u8, itr.next().?.items, "456");
         try std.testing.expect(itr.next() == null);
     }
     { // match special characters (typical) - between
         var itr = match("\\d{3,4}", "123456");
-        try std.testing.expectEqualSlices(u8, itr.next() orelse unreachable, "1234");
+        try std.testing.expectEqualSlices(u8, itr.next().?.items, "1234");
         try std.testing.expect(itr.next() == null);
     }
     { // match special characters (inverse)
         var itr = match("\\D+", "123a456");
-        try std.testing.expectEqualSlices(u8, itr.next() orelse unreachable, "a");
+        try std.testing.expectEqualSlices(u8, itr.next().?.items, "a");
         try std.testing.expect(itr.next() == null);
     }
     { // pipe-or clauses
         var itr = match("abc|def", "_abc_def_");
-        try std.testing.expectEqualSlices(u8, itr.next() orelse unreachable, "abc");
-        try std.testing.expectEqualSlices(u8, itr.next() orelse unreachable, "def");
+        try std.testing.expectEqualSlices(u8, itr.next().?.items, "abc");
+        try std.testing.expectEqualSlices(u8, itr.next().?.items, "def");
         try std.testing.expect(itr.next() == null);
     }
     {
         var itr = match("(a+bc)+", "_aaabc_abcabc_bc_abc_");
-        try std.testing.expectEqualSlices(u8, itr.next() orelse unreachable, "aaabc");
-        try std.testing.expectEqualSlices(u8, itr.next() orelse unreachable, "abcabc");
-        try std.testing.expectEqualSlices(u8, itr.next() orelse unreachable, "abc");
+        try std.testing.expectEqualSlices(u8, itr.next().?.items, "aaabc");
+        try std.testing.expectEqualSlices(u8, itr.next().?.items, "abcabc");
+        try std.testing.expectEqualSlices(u8, itr.next().?.items, "abc");
         try std.testing.expect(itr.next() == null);
     }
     { // character sets (typical)
         var itr = match("[a1]+", "_a112_21aa112_a_1_x_2");
-        try std.testing.expectEqualSlices(u8, itr.next() orelse unreachable, "a11");
-        try std.testing.expectEqualSlices(u8, itr.next() orelse unreachable, "1aa11");
-        try std.testing.expectEqualSlices(u8, itr.next() orelse unreachable, "a");
-        try std.testing.expectEqualSlices(u8, itr.next() orelse unreachable, "1");
+        try std.testing.expectEqualSlices(u8, itr.next().?.items, "a11");
+        try std.testing.expectEqualSlices(u8, itr.next().?.items, "1aa11");
+        try std.testing.expectEqualSlices(u8, itr.next().?.items, "a");
+        try std.testing.expectEqualSlices(u8, itr.next().?.items, "1");
         try std.testing.expect(itr.next() == null);
     }
     { // character sets (negated)
         var itr = match("[^a1]+", "_a112_21aa112_a_1_x_2");
-        try std.testing.expectEqualSlices(u8, itr.next() orelse unreachable, "_");
-        try std.testing.expectEqualSlices(u8, itr.next() orelse unreachable, "2_2");
-        try std.testing.expectEqualSlices(u8, itr.next() orelse unreachable, "2_");
-        try std.testing.expectEqualSlices(u8, itr.next() orelse unreachable, "_");
-        try std.testing.expectEqualSlices(u8, itr.next() orelse unreachable, "_x_2");
+        try std.testing.expectEqualSlices(u8, itr.next().?.items, "_");
+        try std.testing.expectEqualSlices(u8, itr.next().?.items, "2_2");
+        try std.testing.expectEqualSlices(u8, itr.next().?.items, "2_");
+        try std.testing.expectEqualSlices(u8, itr.next().?.items, "_");
+        try std.testing.expectEqualSlices(u8, itr.next().?.items, "_x_2");
         try std.testing.expect(itr.next() == null);
     }
     { // character sets (negated)
         var itr = match("[^\\d]+", "_a112_21aa112_a_1_x_2");
-        try std.testing.expectEqualSlices(u8, itr.next() orelse unreachable, "_a");
-        try std.testing.expectEqualSlices(u8, itr.next() orelse unreachable, "_");
-        try std.testing.expectEqualSlices(u8, itr.next() orelse unreachable, "aa");
-        try std.testing.expectEqualSlices(u8, itr.next() orelse unreachable, "_a_");
-        try std.testing.expectEqualSlices(u8, itr.next() orelse unreachable, "_x_");
+        try std.testing.expectEqualSlices(u8, itr.next().?.items, "_a");
+        try std.testing.expectEqualSlices(u8, itr.next().?.items, "_");
+        try std.testing.expectEqualSlices(u8, itr.next().?.items, "aa");
+        try std.testing.expectEqualSlices(u8, itr.next().?.items, "_a_");
+        try std.testing.expectEqualSlices(u8, itr.next().?.items, "_x_");
         try std.testing.expect(itr.next() == null);
     }
     { // character sets (compound)
         var itr = match("[abc]\\d+", "_ab112_c987b123_d16_");
-        try std.testing.expectEqualSlices(u8, itr.next() orelse unreachable, "b112");
-        try std.testing.expectEqualSlices(u8, itr.next() orelse unreachable, "c987");
-        try std.testing.expectEqualSlices(u8, itr.next() orelse unreachable, "b123");
+        try std.testing.expectEqualSlices(u8, itr.next().?.items, "b112");
+        try std.testing.expectEqualSlices(u8, itr.next().?.items, "c987");
+        try std.testing.expectEqualSlices(u8, itr.next().?.items, "b123");
         try std.testing.expect(itr.next() == null);
     }
     { // character sets (spans)
         var itr = Fluent.match("[a-zA-Z]+", "bb12avxz34CBF");
-        try std.testing.expectEqualSlices(u8, itr.next() orelse unreachable, "bb");
-        try std.testing.expectEqualSlices(u8, itr.next() orelse unreachable, "avxz");
-        try std.testing.expectEqualSlices(u8, itr.next() orelse unreachable, "CBF");
+        try std.testing.expectEqualSlices(u8, itr.next().?.items, "bb");
+        try std.testing.expectEqualSlices(u8, itr.next().?.items, "avxz");
+        try std.testing.expectEqualSlices(u8, itr.next().?.items, "CBF");
         try std.testing.expect(itr.next() == null);
     }
     { // backtracking optimization
         var itr = Fluent.match("\".*\"", "xxx\"Hello, World!\"xxx");
-        try std.testing.expectEqualSlices(u8, itr.next() orelse unreachable, "\"Hello, World!\"");
+        try std.testing.expectEqualSlices(u8, itr.next().?.items, "\"Hello, World!\"");
         try std.testing.expect(itr.next() == null);
     }
 }
 
-test "regex-engine1                            : match iterator -> regex\n" {
+test "regex-engine1                             : match iterator -> regex" {
     {
         const expression = "\\d+";
         const string = "0123456789";
-        var iter = match(expression, string);
-        const result = iter.next() orelse unreachable;
+        var itr = match(expression, string);
+        const result = itr.next().?.items;
         try expectEqSlice(u8, "0123456789", result);
     }
 }
 
 
-test "regex-engine3                            : match iterator -> regex\n" {
+test "regex-engine3                             : match iterator -> regex" {
     {
         const expression = "\\d+";
         const string = "aa0123456789aa";
-        var iter = match(expression, string);
-        const result = iter.next() orelse unreachable;
+        var itr = match(expression, string);
+        const result = itr.next().?.items;
         try expectEqSlice(u8, "0123456789", result);
     }
 }
 
-test "regex-engine4                            : match iterator -> regex\n" {
+test "regex-engine4                             : match iterator -> regex" {
     const expression = "\\d+";
     const string = "\\dDmW0123456789aa\\1:";
-    var iter = match(expression, string);
-    const result = iter.next() orelse unreachable;
+    var itr = match(expression, string);
+    const result = itr.next().?.items;
     try expectEqSlice(u8, "0123456789", result);
 }
 
-test "regex-engine5                            : match iterator -> regex\n" {
+test "regex-engine5                             : match iterator -> regex" {
 
    const expression = "\\d*";
    const string = "\\dDmW0123456789aa\\1:";
-   var iter = match(expression, string);
-   const result = iter.next() orelse unreachable;
+   var itr = match(expression, string);
+   const result = itr.next().?.items;
    try expectEqSlice(u8, "0123456789", result);
 
 }
-//
-test "regex-engine6                            : match iterator -> regex\n" {
+
+test "regex-engine6                             : match iterator -> regex" {
     // @SOLVED
     {
         const expression = "\\d?";
         const string = "abc0123456789abc";
-        var iter = match(expression, string);
-        const result = iter.next() orelse unreachable;
+        var itr = match(expression, string);
+        const result = itr.next().?.items;
         try expectEqSlice(u8, "0", result);
     }
 }
-//
-test "regex-engine7                            : match iterator -> regex\n" {
+
+test "regex-engine7                             : match iterator -> regex" {
     {
         const expression = "\\d{10}";
         const string = "abc0123456789abc";
-        var iter = match(expression, string);
-        const result = iter.next() orelse unreachable;
+        var itr = match(expression, string);
+        const result = itr.next().?.items;
         try expectEqSlice(u8, "0123456789", result);
     }
 }
 
-test "regex-engine9                            : match iterator -> regex\n" {
+test "regex-engine9                             : match iterator -> regex" {
     const expression = "\\d{11}";
     const string = "abc0123456789abc";
-    var iter = match(expression, string);
-    const result = iter.next();
+    var itr = match(expression, string);
+    const result = itr.next();
     try expect(result == null);
 }
 
-test "regex-engine10                           : match iterator -> regex\n" {
+test "regex-engine10                            : match iterator -> regex" {
      const expression = "\\d{0,10}";
      const string = "abc0123456789abc";
-     var iter = match(expression, string);
-     const result = iter.next() orelse unreachable;
+     var itr = match(expression, string);
+     const result = itr.next().?.items;
      try expectEqSlice(u8, "0123456789", result);
 }
 
-test "regex-engine11                           : match iterator -> regex\n" {
+test "regex-engine11                            : match iterator -> regex" {
     {
         const expression = "\\D\\D\\D\\d\\d\\d\\d\\d\\d\\d\\d\\d\\d\\D\\D\\D";
         const string = "abc0123456789abc";
-        var iter = match(expression, string);
-        const result = iter.next() orelse unreachable;
+        var itr = match(expression, string);
+        const result = itr.next().?.items;
         try expectEqSlice(u8, "abc0123456789abc", result);
     }
 }
 
-test "regex-engine12                           : match iterator -> regex\n" {
-    // @BUG
+test "regex-engine12                            : match iterator -> regex" {
     {
         const expression = "\\D\\D\\D\\d{0,10}\\D\\D\\D";
         const string = "abc0123456789abc";
-        var iter = match(expression, string);
-        const result = iter.next() orelse unreachable;
+        var itr = match(expression, string);
+        const result = itr.next().?.items;
         try expectEqSlice(u8, "abc0123456789abc", result);
     }
 }
 //
-//test "regex-engine13                           : match iterator -> regex\n" {
-//    {
-//        const expression = "\\D|\\d";
-//        const string = "abc0123456789abc";
-//        var iter = match(expression, string);
-//        for (string) |ch| {
-//            const result = iter.next() orelse unreachable;
-//            try expect(result[0] == ch);
-//        }
-//    }
-//}
-//
-test "regex-engine14                           : match iterator -> regex\n" {
-    // @SOLVED
+test "regex-engine13                            : match iterator -> regex" {
     {
-        const expression = "\\D?|\\d?";
+        const expression = "\\D|\\d";
         const string = "abc0123456789abc";
-        var iter = match(expression, string);
+        var itr = match(expression, string);
         for (string) |ch| {
-            const result = iter.next() orelse unreachable;
+            const result = itr.next().?.items;
             try expect(result[0] == ch);
         }
     }
 }
-//
-test "regex-engine15                           : match iterator -> regex\n" {
+
+test "regex-engine14                            : match iterator -> regex" {
+    {
+        const expression = "\\D?|\\d?";
+        const string = "abc0123456789abc";
+        var itr = match(expression, string);
+        for (string) |ch| {
+            const result = itr.next().?.items;
+            try expect(result[0] == ch);
+        }
+    }
+}
+
+test "regex-engine15                            : match iterator -> regex" {
     const expression = "[abc]{3}|[0-9]{10}";
     const string = "abc0123456789abc";
-    var iter = match(expression, string);
-    try expectEqSlice(u8, "abc", iter.next() orelse unreachable);
-    try expectEqSlice(u8, "0123456789", iter.next() orelse unreachable);
-    try expectEqSlice(u8, "abc", iter.next() orelse unreachable);
+    var itr = match(expression, string);
+    try expectEqSlice(u8, "abc", itr.next().?.items);
+    try expectEqSlice(u8, "0123456789", itr.next().?.items);
+    try expectEqSlice(u8, "abc", itr.next().?.items);
 }
 
-test "regex-engine16                           : match iterator -> regex\n" {
+test "regex-engine16                            : match iterator -> regex" {
     const expression = "\\D[abc]+|\\d[0-9]+";
     const string = "abc0123456789abc";
-    var iter = match(expression, string);
-    try expectEqSlice(u8, "abc", iter.next() orelse unreachable);
-    try expectEqSlice(u8, "0123456789", iter.next() orelse unreachable);
-    try expectEqSlice(u8, "abc", iter.next() orelse unreachable);
+    var itr = match(expression, string);
+    try expectEqSlice(u8, "abc", itr.next().?.items);
+    try expectEqSlice(u8, "0123456789", itr.next().?.items);
+    try expectEqSlice(u8, "abc", itr.next().?.items);
 }
 
-test "regex-engine17                           : match iterator -> regex\n" {
+test "regex-engine17                            : match iterator -> regex" {
     const expression = "[abc]?|[0-9]{10}";
     const string = "abc0123456789abc";
-    var iter = match(expression, string);
-    try expectEqSlice(u8, "a", iter.next() orelse unreachable);
-    try expectEqSlice(u8, "b", iter.next() orelse unreachable);
-    try expectEqSlice(u8, "c", iter.next() orelse unreachable);
-    try expectEqSlice(u8, "0123456789", iter.next() orelse unreachable);
-    try expectEqSlice(u8, "a", iter.next() orelse unreachable);
-    try expectEqSlice(u8, "b", iter.next() orelse unreachable);
-    try expectEqSlice(u8, "c", iter.next() orelse unreachable);
+    var itr = match(expression, string);
+    try expectEqSlice(u8, "a", itr.next().?.items);
+    try expectEqSlice(u8, "b", itr.next().?.items);
+    try expectEqSlice(u8, "c", itr.next().?.items);
+    try expectEqSlice(u8, "0123456789", itr.next().?.items);
+    try expectEqSlice(u8, "a", itr.next().?.items);
+    try expectEqSlice(u8, "b", itr.next().?.items);
+    try expectEqSlice(u8, "c", itr.next().?.items);
 }
 //
-test "regex-engine18                           : match iterator -> regex\n" {
+test "regex-engine18                            : match iterator -> regex" {
     const expression = "\\d{3}([A-Za-z]+)\\d{3}";
     const string = "123Fluent123";
-    var iter = match(expression, string);
-    try expectEqSlice(u8, "123Fluent123", iter.next() orelse unreachable);
+    var itr = match(expression, string);
+    try expectEqSlice(u8, "123Fluent123", itr.next().?.items);
 }
 
-test "regex-engine19                           : match iterator -> regex\n" {
+test "regex-engine19                            : match iterator -> regex" {
     const expression = "(\\d{3}([A-Za-z]+))?|\\d{3}";
     const string = "123Fluent123";
-    var iter = match(expression, string);
-    try expectEqSlice(u8, "123Fluent", iter.next() orelse unreachable);
-    try expectEqSlice(u8, "123", iter.next() orelse unreachable);
+    var itr = match(expression, string);
+    try expectEqSlice(u8, "123Fluent", itr.next().?.items);
+    try expectEqSlice(u8, "123", itr.next().?.items);
 }
 
-test "regex-engine20                           : match iterator -> regex\n" {
+test "regex-engine20                            : match iterator -> regex" {
     const expression = "(([a-z][0-9])|([a-z][0-9]))+";
     const string = "a1b2c3d4e5f6g7h8";
-    var iter = match(expression, string);
-    try expectEqSlice(u8, "a1b2c3d4e5f6g7h8", iter.next() orelse unreachable);
+    var itr = match(expression, string);
+    try expectEqSlice(u8, "a1b2c3d4e5f6g7h8", itr.next().?.items);
 }
 
-test "regex-engine21                           : match iterator -> regex\n" {
+test "regex-engine21                            : match iterator -> regex" {
     const expression = "(([a-z][0-9])|([a-z][0-9])?)+";
     const string = "a1b2c3d4e5f6g7h8";
-    var iter = match(expression, string);
-    try expectEqSlice(u8, "a1b2c3d4e5f6g7h8", iter.next() orelse unreachable);
+    var itr = match(expression, string);
+    try expectEqSlice(u8, "a1b2c3d4e5f6g7h8", itr.next().?.items);
 }
 
-test "regex-engine22                           : match iterator -> regex\n" {
+test "regex-engine22                            : match iterator -> regex" {
     const expression = "(([a-z]?[0-9]?)?|([a-z]?[0-9]?)?)+";
     const string = "a1b2c3d4e5f6g7h8";
-    var iter = match(expression, string);
-    try expectEqSlice(u8, "a1b2c3d4e5f6g7h8", iter.next() orelse unreachable);
+    var itr = match(expression, string);
+    try expectEqSlice(u8, "a1b2c3d4e5f6g7h8", itr.next().?.items);
 }
 //
-test "regex-engine23                           : match iterator -> regex\n" {
+test "regex-engine23                            : match iterator -> regex" {
     const expression = "(([a-z]?[0-9]?)?|([a-z]?[0-9]?)?)+";
     const string = "a1b2c3d4e5f6g7h8";
-    var iter = match(expression, string);
-    try expectEqSlice(u8, "a1b2c3d4e5f6g7h8", iter.next() orelse unreachable);
+    var itr = match(expression, string);
+    try expectEqSlice(u8, "a1b2c3d4e5f6g7h8", itr.next().?.items);
 }
 
-test "regex-engine25                          : match iterator -> regex\n" {
+test "regex-engine25                            : match iterator -> regex" {
     {
         const expression = "[^0-9]+";
         const string = "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
-        var iter = match(expression, string);
-        try expectEqSlice(u8, "abcdefghijklmnopqrstuvwxyz", iter.next() orelse unreachable);
-        try expectEqSlice(u8, "ABCDEFGHIJKLMNOPQRSTUVWXYZ", iter.next() orelse unreachable);
+        var itr = match(expression, string);
+        try expectEqSlice(u8, "abcdefghijklmnopqrstuvwxyz", itr.next().?.items);
+        try expectEqSlice(u8, "ABCDEFGHIJKLMNOPQRSTUVWXYZ", itr.next().?.items);
     }
 }
 
-test "regex-engine26                          : match iterator -> regex\n" {
+test "regex-engine26                            : match iterator -> regex" {
     {
         const expression = "[^0-8]+";
         const string = "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
-        var iter = match(expression, string);
-        try expectEqSlice(u8, "abcdefghijklmnopqrstuvwxyz", iter.next() orelse unreachable);
-        try expectEqSlice(u8, "9ABCDEFGHIJKLMNOPQRSTUVWXYZ", iter.next() orelse unreachable);
+        var itr = match(expression, string);
+        try expectEqSlice(u8, "abcdefghijklmnopqrstuvwxyz", itr.next().?.items);
+        try expectEqSlice(u8, "9ABCDEFGHIJKLMNOPQRSTUVWXYZ", itr.next().?.items);
     }
 }
 
-test "regex-engine27                          : match iterator -> regex\n" {
+test "regex-engine27                            : match iterator -> regex" {
     {
         const expression = "[^1-9]+";
         const string = "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
-        var iter = match(expression, string);
-        try expectEqSlice(u8, "abcdefghijklmnopqrstuvwxyz0", iter.next() orelse unreachable);
-        try expectEqSlice(u8, "ABCDEFGHIJKLMNOPQRSTUVWXYZ", iter.next() orelse unreachable);
+        var itr = match(expression, string);
+        try expectEqSlice(u8, "abcdefghijklmnopqrstuvwxyz0", itr.next().?.items);
+        try expectEqSlice(u8, "ABCDEFGHIJKLMNOPQRSTUVWXYZ", itr.next().?.items);
     }
 }
 
-test "regex-engine28                          : match iterator -> regex\n" {
+test "regex-engine28                            : match iterator -> regex" {
     {
         const expression = "([^a-z]+[^A-Z]+)";
         const string = "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
-        var iter = match(expression, string);
-        try expectEqSlice(u8, "0123456789", iter.next() orelse unreachable);
+        var itr = match(expression, string);
+        try expectEqSlice(u8, "0123456789", itr.next().?.items);
     }
 }
 
-test "regex-engine29                          : match iterator -> regex\n" {
+test "regex-engine29                            : match iterator -> regex" {
     {
         const expression = "([^a-z^A-Z]+)";
         const string = "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
-        var iter = match(expression, string);
-        try expectEqSlice(u8, "0123456789", iter.next() orelse unreachable);
+        var itr = match(expression, string);
+        try expectEqSlice(u8, "0123456789", itr.next().?.items);
     }
 }
 
-test "regex-engine30                          : match iterator -> regex\n" {
+test "regex-engine30                            : match iterator -> regex" {
     {
         const expression = "([^a-z^^^^A-Z]+)";
         const string = "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
-        var iter = match(expression, string);
-        try expectEqSlice(u8, "0123456789", iter.next() orelse unreachable);
+        var itr = match(expression, string);
+        try expectEqSlice(u8, "0123456789", itr.next().?.items);
     }
 }
 
-test "regex-engine31                          : match iterator -> regex\n" {
+test "regex-engine31                            : match iterator -> regex" {
     {
         const expression = "([^a-z^A-Z]+)";
         const string = "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
-        var iter = match(expression, string);
-        try expectEqSlice(u8, "0123456789", iter.next() orelse unreachable);
+        var itr = match(expression, string);
+        try expectEqSlice(u8, "0123456789", itr.next().?.items);
     }
 }
 
-test "regex-engine32                          : match iterator -> regex\n" {
+test "regex-engine32                            : match iterator -> regex" {
     {
         const expression = "a?b?c?d?e?f?g?";
         const string = "xyzabcdefg";
-        var iter = match(expression, string);
-        try expectEqSlice(u8, "abcdefg", iter.next() orelse unreachable);
+        var itr = match(expression, string);
+        try expectEqSlice(u8, "abcdefg", itr.next().?.items);
     }
 }
 
-test "regex-engine33                          : match iterator -> regex\n" {
+test "regex-engine33                            : match iterator -> regex" {
     {
         const expression = "a+b+c+d+e+f+g+";
         const string = "abcdefghijklmnopqrstuvwxyz";
-        var iter = match(expression, string);
-        try expectEqSlice(u8, "abcdefg", iter.next() orelse unreachable);
+        var itr = match(expression, string);
+        try expectEqSlice(u8, "abcdefg", itr.next().?.items);
     }
 }
 
-test "regex-engine34                          : match iterator -> regex\n" {
+test "regex-engine34                            : match iterator -> regex" {
     {
         const expression = "a{1}b{1}c{1}d{1}e{1}f{1}g";
         const string = "abcdefgh";
-        var iter = match(expression, string);
-        try expectEqSlice(u8, "abcdefg", iter.next() orelse unreachable);
+        var itr = match(expression, string);
+        try expectEqSlice(u8, "abcdefg", itr.next().?.items);
     }
 }
 
-test "regex-engine35                          : match iterator -> regex\n" {
+test "regex-engine35                            : match iterator -> regex" {
     {
         const expression = "a{0,1}b{0,1}c{0,1}d{0,1}e{0,1}f{0,1}g{0,1}";
         const string = "xyzabcdefg";
-        var iter = match(expression, string);
-        try expectEqSlice(u8, "abcdefg", iter.next() orelse unreachable);
+        var itr = match(expression, string);
+        try expectEqSlice(u8, "abcdefg", itr.next().?.items);
     }
 }
 
-test "regex-engine36                           : match iterator-> regex\n" {
+test "regex-engine36                            : match iterator-> regex" {
     {
         const expression = "(a)+(b)+(c)+(d)+(e)+(f)+(g)+";
         const string = "abcdefg";
-        var iter = match(expression, string);
-        try expectEqSlice(u8, "abcdefg", iter.next() orelse unreachable);
+        var itr = match(expression, string);
+        try expectEqSlice(u8, "abcdefg", itr.next().?.items);
     }
 }
 
-test "regex-engine37                           : match iterator-> regex\n" {
+test "regex-engine37                            : match iterator-> regex" {
     {
         const expression = "(a){0,1}(b){0,1}(c){0,1}(d){0,1}";
         const string = "abcdefg";
-        var iter = match(expression, string);
-        try expectEqSlice(u8, "abcd", iter.next() orelse unreachable);
+        var itr = match(expression, string);
+        try expectEqSlice(u8, "abcd", itr.next().?.items);
     }
 }
 
-test "regex-engine38                           : match iterator-> regex\n" {
+test "regex-engine38                            : match iterator-> regex" {
 
     {
         const string = "Call us today at 123-456-7890 or 9876543210 to rewrite your DNA in Zig!";
         var itr = Fluent.match("\\d{3}-\\d{3}-\\d{4}|\\d{10}", string);
-        try std.testing.expectEqualSlices(u8, "123-456-7890", itr.next() orelse unreachable);
-        try std.testing.expectEqualSlices(u8, "9876543210", itr.next() orelse unreachable);
+        try std.testing.expectEqualSlices(u8, "123-456-7890", itr.next().?.items);
+        try std.testing.expectEqualSlices(u8, "9876543210", itr.next().?.items);
         try std.testing.expect(itr.next() == null);
     }
     {
         const string = "Call us today at 123-456-7890 or 9876543210 to say hi!";
         var itr = Fluent.match("\\d{3}-?\\d{3}-?\\d{4}", string);
-        try std.testing.expectEqualSlices(u8, "123-456-7890", itr.next() orelse unreachable);
-        try std.testing.expectEqualSlices(u8, "9876543210", itr.next() orelse unreachable);
+        try std.testing.expectEqualSlices(u8, "123-456-7890", itr.next().?.items);
+        try std.testing.expectEqualSlices(u8, "9876543210", itr.next().?.items);
         try std.testing.expect(itr.next() == null);
     }
     {
@@ -4289,11 +4276,42 @@ test "regex-engine38                           : match iterator-> regex\n" {
             "great stock tip: \"I like turtles\"";
             
         var itr = Fluent.match("[sS]tock\\s{0,3}tips?: \"[^\"]+\"", string);
-        try std.testing.expectEqualSlices(u8, "Stock  tip: \"buy dog food\"", itr.next() orelse unreachable);
-        try std.testing.expectEqualSlices(u8, "stock\ttips: \"Why bother\"", itr.next() orelse unreachable);
-        try std.testing.expectEqualSlices(u8, "Stock   tips: \"get a job\"", itr.next() orelse unreachable);
-        try std.testing.expectEqualSlices(u8, "stock tip: \"I like turtles\"", itr.next() orelse unreachable);
+        try std.testing.expectEqualSlices(u8, "Stock  tip: \"buy dog food\"", itr.next().?.items);
+        try std.testing.expectEqualSlices(u8, "stock\ttips: \"Why bother\"", itr.next().?.items);
+        try std.testing.expectEqualSlices(u8, "Stock   tips: \"get a job\"", itr.next().?.items);
+        try std.testing.expectEqualSlices(u8, "stock tip: \"I like turtles\"", itr.next().?.items);
         try std.testing.expect(itr.next() == null);
     }
 }
 
+test "regex-engine39                            : fluent interface-> replace regex" {
+    var buf: [100]u8 = undefined;
+
+    try std.testing.expect(
+        Fluent.init(buf[0..])
+        .copy("This is a test test test string.")
+        .replace(.regex, "test", "cow")
+        .equal("This is a cow cow cow string.")
+    );
+
+    try std.testing.expect(
+        Fluent.init(buf[0..])
+        .copy("This is a test test test string.")
+        .replace(.regex, "t\\w{2,4}(?= )", "cow")
+        .equal("This is a cow cow cow string.")
+    );
+
+    try std.testing.expect(
+        Fluent.init(buf[0..])
+        .copy("qaaq aa a aaa aba a")
+        .replace(.regex, "a?a", "x")
+        .equal("qxq x x xx xbx x")
+    );
+
+    try std.testing.expect(
+        Fluent.init(buf[0..])
+        .copy("qaaq aa a aaa aba a")
+        .replace(.regex, " ?a?a ?", "")
+        .equal("qqb")
+    );
+}
